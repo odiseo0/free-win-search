@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
+from enum import StrEnum
+from uuid import UUID
 
 from pydantic import Field
 
@@ -125,6 +127,10 @@ class CardListingResponse(BaseModel):
         default=0,
         description="Cantidad disponible observada; cero indica falta de stock.",
     )
+    source: str = Field(default="coolstuffinc")
+    currency: str = Field(default="USD")
+    last_seen_at: datetime | None = None
+    is_active: bool = True
     date_added: datetime | None = Field(
         default=None,
         description="Fecha de persistencia; nula para resultados aún no guardados.",
@@ -137,3 +143,30 @@ class CardListingResponse(BaseModel):
 
 class CardListingListResponse(PaginatedResponse[CardListingResponse]):
     pass
+
+
+class ScrapeJobStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    RETRY_WAIT = "retry_wait"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
+class ScrapeJobResponse(BaseModel):
+    job_id: UUID
+    ygo_id: int
+    status: ScrapeJobStatus
+    attempts: int
+    available_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    error_code: str | None = None
+
+
+class ScrapeAcceptedResponse(BaseModel):
+    job_id: UUID
+    ygo_id: int
+    status: ScrapeJobStatus
+    status_url: str
+    retry_after_seconds: int = 2

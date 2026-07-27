@@ -1,4 +1,4 @@
-from pytz import timezone
+from datetime import timedelta, timezone
 
 BASE_URL = "https://www.coolstuffinc.com/p/YuGiOh/"
 BASE_URL_SEARCH = "https://www.coolstuffinc.com/main_search.php"
@@ -14,4 +14,4 @@ USER_AGENT = (
 EXCEL_TEMPLATE_FILENAME = "Template.xlsx"
 EXPORT_PLATFORM_NAME = "CoolStuffInc"
 YGO_API_URL = "https://db.ygoprodeck.com/api/v7/cardinfo.php"
-TZ = timezone("America/Caracas")
+TZ = timezone(timedelta(hours=-4), name="America/Caracas")

@@ -6,8 +6,11 @@ from .entities import (
     CardListingResponse,
     CardResponse,
     CardUpdate,
+    ScrapeAcceptedResponse,
+    ScrapeJobResponse,
+    ScrapeJobStatus,
 )
-from .errors import CardListingNotFound, CardNotFound
+from .errors import CardListingNotFound, CardNotFound, ScrapeJobNotFound
 
 __all__ = [
     "Card",
@@ -19,4 +22,8 @@ __all__ = [
     "CardNotFound",
     "CardResponse",
     "CardUpdate",
+    "ScrapeAcceptedResponse",
+    "ScrapeJobNotFound",
+    "ScrapeJobResponse",
+    "ScrapeJobStatus",
 ]
