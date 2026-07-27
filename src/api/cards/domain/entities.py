@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
 from enum import StrEnum
+from typing import Any
 from uuid import UUID
 
 from pydantic import Field

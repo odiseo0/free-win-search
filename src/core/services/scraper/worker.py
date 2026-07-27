@@ -7,6 +7,7 @@ import random
 from concurrent.futures import ProcessPoolExecutor
 from datetime import UTC, datetime
 from time import monotonic
+from typing import Self
 
 import httpx
 
@@ -18,7 +19,7 @@ from src.api.cards.repository.scrape_jobs import (
     mark_job_succeeded,
 )
 from src.core.constants import BASE_URL, USER_AGENT
-from src.core.db import async_session_factory
+from src.core.db.deps import async_session_factory
 from src.core.services.cache import Cache, get_cache
 from src.settings.scraper_settings import ScraperSettings, scraper_settings
 
@@ -48,7 +49,7 @@ class ScraperWorker:
         self._last_request_at = 0.0
         self._rate_lock = asyncio.Lock()
 
-    async def __aenter__(self) -> ScraperWorker:
+    async def __aenter__(self) -> Self:
         self._client = httpx.AsyncClient(
             base_url=BASE_URL,
             headers={"User-Agent": USER_AGENT},
@@ -57,13 +58,16 @@ class ScraperWorker:
         )
         self._executor = ProcessPoolExecutor()
         await self.cache.start()
+
         return self
 
     async def __aexit__(self, *_: object) -> None:
         if self._client is not None:
             await self._client.aclose()
+
         if self._executor is not None:
             self._executor.shutdown(wait=True, cancel_futures=True)
+
         await self.cache.close()
 
     async def _wait_for_host(self) -> None:
@@ -71,37 +75,43 @@ class ScraperWorker:
             delay = self.settings.min_host_interval_seconds - (
                 monotonic() - self._last_request_at
             )
+
             if delay > 0:
                 await asyncio.sleep(delay)
+
             self._last_request_at = monotonic()
 
     async def process_once(self) -> bool:
         async with async_session_factory() as db:
-            job = await claim_next_job(
-                db, lease_seconds=self.settings.lease_seconds
-            )
+            job = await claim_next_job(db, lease_seconds=self.settings.lease_seconds)
+
         if job is None:
             return False
 
         started = monotonic()
         error_code: str | None = None
         retry_override: int | None = None
+
         try:
             await self._wait_for_host()
             assert self._client is not None
-            extraction = await fetch_card_page(
-                self._client, job.target.canonical_name
-            )
+            extraction = await fetch_card_page(self._client, job.target.canonical_name)
+
             if extraction.status is not ExtractStatus.SUCCESS:
                 error_code = extraction.status.value
                 retry_override = extraction.retry_after_seconds
+
                 raise RuntimeError(error_code)
+
             if extraction.html is None:
                 error_code = "empty_response"
+
                 raise RuntimeError(error_code)
 
             loop = asyncio.get_running_loop()
+
             assert self._executor is not None
+
             transformed: TransformResult = await loop.run_in_executor(
                 self._executor,
                 transform_card_page,
@@ -109,6 +119,7 @@ class ScraperWorker:
                 job.target.canonical_name,
             )
             now = datetime.now(UTC)
+
             async with async_session_factory() as db:
                 await load_scraped_data_to_database(
                     db,
@@ -122,9 +133,7 @@ class ScraperWorker:
                     db,
                     job.id,
                     result_count=len(transformed.listings),
-                    next_refresh_at=next_refresh_at(
-                        job.target.last_requested_at, now
-                    ),
+                    next_refresh_at=next_refresh_at(job.target.last_requested_at, now),
                     now=now,
                 )
                 await db.commit()
@@ -136,6 +145,7 @@ class ScraperWorker:
                     "cache invalidation failed after successful commit",
                     extra={"job_id": str(job.id)},
                 )
+
             _log(
                 "job_succeeded",
                 job_id=job.id,
@@ -144,6 +154,7 @@ class ScraperWorker:
                 duration_seconds=round(monotonic() - started, 3),
                 result_count=len(transformed.listings),
             )
+
             return True
         except ParserStructureError:
             error_code = "parser_structure"
@@ -162,6 +173,7 @@ class ScraperWorker:
             duration_seconds=round(monotonic() - started, 3),
             error_code=error_code,
         )
+
         return True
 
     async def _record_failure(
@@ -177,6 +189,7 @@ class ScraperWorker:
         configured = self.settings.retry_delays_seconds[delay_index]
         base_delay = retry_override if retry_override is not None else configured
         jittered_delay = max(1, round(base_delay * random.uniform(0.9, 1.1)))
+
         async with async_session_factory() as db:
             await mark_job_failed(
                 db,
@@ -188,13 +201,16 @@ class ScraperWorker:
 
     async def run_forever(self) -> None:
         _log("worker_started", poll_seconds=self.settings.poll_seconds)
+
         while True:
             processed = await asyncio.gather(
                 *(self.process_once() for _ in range(self.settings.concurrency))
             )
+
             if not any(processed):
                 async with async_session_factory() as db:
                     backlog = await backlog_size(db)
+
                 _log("worker_heartbeat", backlog=backlog)
                 await asyncio.sleep(self.settings.poll_seconds)
 
