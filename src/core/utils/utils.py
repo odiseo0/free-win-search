@@ -9,13 +9,14 @@ from src.core.constants import TZ
 
 class CardListing(Protocol):
     code: str
+    name: str
     condition: str
     price: Decimal
 
 
 def deduplicate_listings(listings: list["CardListing"]) -> list["CardListing"]:
     seen: set[tuple[str, str, Decimal]] = set()
-    unique: list["CardListing"] = []
+    unique: list[CardListing] = []
 
     for listing in listings:
         key = (listing.code, listing.condition, listing.price)
@@ -38,6 +39,7 @@ def sort_listings(listings: list["CardListing"]) -> list["CardListing"]:
 def extract_price_value(price_str: str | Decimal) -> Decimal:
     if isinstance(price_str, Decimal):
         return price_str
+
     if price_str == "N/A":
         return Decimal(0)
 
@@ -68,6 +70,7 @@ def sanitize_filename(name: str) -> str:
 def pluralize(noun: str) -> str:
     if re.search("[sxz]$", noun) or re.search("[^aeioudgkprt]h$", noun):
         return re.sub("$", "es", noun)
+
     if re.search("[^aeiou]y$", noun):
         return re.sub("y$", "ies", noun)
 
@@ -77,6 +80,7 @@ def pluralize(noun: str) -> str:
 def to_snake(camel: str) -> str:
     snake = re.sub(r"([a-zA-Z])([0-9])", lambda m: f"{m.group(1)}_{m.group(2)}", camel)
     snake = re.sub(r"([a-z0-9])([A-Z])", lambda m: f"{m.group(1)}_{m.group(2)}", snake)
+
     return snake.lower()
 
 

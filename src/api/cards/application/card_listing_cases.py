@@ -1,18 +1,26 @@
 from __future__ import annotations
 
-from decimal import Decimal
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Never
+from uuid import UUID
+
+from sqlalchemy import select
 
 from src.api.cards.domain import (
     CardListingListResponse,
     CardListingNotFound,
     CardListingResponse,
+    ScrapeAcceptedResponse,
+    ScrapeJobNotFound,
+    ScrapeJobResponse,
+    ScrapeJobStatus,
 )
 from src.api.cards.repository import dao_card_listings as dao
+from src.api.cards.repository import dao_cards
+from src.api.cards.repository.model import ScrapeTarget
+from src.api.cards.repository.scrape_jobs import enqueue_for_card, get_job
 from src.core import Err, Ok, Result
 from src.core.services.cache import Cache
-from src.core.services.scraper import CardListingSearch
-from src.core.services.scraper.transformers import CardListing as ScrapedCardListing
 from src.core.utils.utils import Empty
 
 from .cache import (
@@ -35,24 +43,8 @@ def _listing_key(card_listing_id: int) -> str:
 
 def _search_key(query: str, limit: int) -> str:
     normalized_query = " ".join(query.strip().casefold().split())
+
     return f"{CARD_LISTING_CACHE_PREFIX}search:{normalized_query}:{limit}"
-
-
-def _scraped_listing_response(listing: ScrapedCardListing) -> CardListingResponse:
-    price: str | Decimal = listing.price
-
-    if isinstance(price, str):
-        price = Decimal(price.replace("$", "").replace(",", "").strip())
-
-    return CardListingResponse(
-        ygo_set=listing.set,
-        name=listing.name,
-        code=listing.code,
-        price=price,
-        rarity=listing.rarity,
-        condition=listing.condition,
-        stock=listing.stock,
-    )
 
 
 async def get_one(
@@ -73,10 +65,7 @@ async def get_one(
 
     response = CardListingResponse.model_validate(listing)
     await set_cached_model(
-        cache,
-        key,
-        response,
-        ttl_seconds=CARD_LISTING_CACHE_TTL_SECONDS,
+        cache, key, response, ttl_seconds=CARD_LISTING_CACHE_TTL_SECONDS
     )
 
     return Ok(response)
@@ -97,19 +86,17 @@ async def get_multi(
 
     listings, total = await dao.get_multi(
         db,
+        where={"is_active": True},
         page=(page - 1) * shows,
         shows=shows,
         ordering=[("price", False)],
     )
     response = CardListingListResponse(
-        items=[CardListingResponse.model_validate(listing) for listing in listings],
+        items=[CardListingResponse.model_validate(item) for item in listings],
         total=total,
     )
     await set_cached_model(
-        cache,
-        key,
-        response,
-        ttl_seconds=CARD_LISTING_CACHE_TTL_SECONDS,
+        cache, key, response, ttl_seconds=CARD_LISTING_CACHE_TTL_SECONDS
     )
 
     return Ok(response)
@@ -118,32 +105,83 @@ async def get_multi(
 async def search(
     db: AsyncSession,
     cache: Cache,
-    scraper: CardListingSearch,
     query: str,
     *,
     limit: int = 100,
-) -> Result[list[CardListingResponse], Never]:
+) -> Result[list[CardListingResponse] | ScrapeAcceptedResponse, Never]:
     key = _search_key(query, limit)
     cached = await get_cached_models(cache, key, CardListingResponse)
 
     if cached is not None:
         return Ok(cached)
 
-    persisted = await dao.search_by_name(db, query, limit=limit)
+    card = await dao_cards.resolve_canonical(db, query)
+    persisted = (
+        await dao.for_card(db, card_id=card.id, limit=limit)
+        if card is not None
+        else await dao.search_by_name(db, query, limit=limit)
+    )
+    response = [CardListingResponse.model_validate(item) for item in persisted]
 
-    if persisted:
-        response = [
-            CardListingResponse.model_validate(listing) for listing in persisted
-        ]
-    else:
-        scraped = await scraper.search(query)
-        response = [_scraped_listing_response(listing) for listing in scraped]
+    # Non-canonical or ambiguous input may read existing rows but cannot enqueue.
+    if card is None:
+        await set_cached_models(
+            cache, key, response, ttl_seconds=CARD_LISTING_CACHE_TTL_SECONDS
+        )
 
-    await set_cached_models(
-        cache,
-        key,
-        response,
-        ttl_seconds=CARD_LISTING_CACHE_TTL_SECONDS,
+        return Ok(response)
+
+    target = (
+        await db.execute(select(ScrapeTarget).where(ScrapeTarget.card_id == card.id))
+    ).scalar_one_or_none()
+    now = datetime.now(UTC)
+    fresh = (
+        target is not None
+        and target.next_refresh_at is not None
+        and target.next_refresh_at > now
     )
 
-    return Ok(response)
+    if fresh:
+        await set_cached_models(
+            cache, key, response, ttl_seconds=CARD_LISTING_CACHE_TTL_SECONDS
+        )
+
+        return Ok(response)
+
+    job = await enqueue_for_card(db, card, now=now)
+
+    if response:
+        return Ok(response)
+
+    return Ok(
+        ScrapeAcceptedResponse(
+            job_id=job.id,
+            ygo_id=card.ygo_id,
+            status=ScrapeJobStatus(job.status),
+            status_url=f"/card-listings/jobs/{job.id}",
+            retry_after_seconds=2,
+        )
+    )
+
+
+async def get_scrape_job(
+    db: AsyncSession,
+    job_id: UUID,
+) -> Result[ScrapeJobResponse, ScrapeJobNotFound]:
+    job = await get_job(db, job_id)
+
+    if job is None:
+        return Err(ScrapeJobNotFound(job_id))
+
+    return Ok(
+        ScrapeJobResponse(
+            job_id=job.id,
+            ygo_id=job.target.ygo_id,
+            status=ScrapeJobStatus(job.status),
+            attempts=job.attempts,
+            available_at=job.available_at,
+            started_at=job.started_at,
+            finished_at=job.finished_at,
+            error_code=job.error_code,
+        )
+    )
