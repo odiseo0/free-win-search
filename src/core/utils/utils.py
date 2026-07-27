@@ -14,7 +14,7 @@ class CardListing(Protocol):
 
 
 def deduplicate_listings(listings: list["CardListing"]) -> list["CardListing"]:
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str, Decimal]] = set()
     unique: list["CardListing"] = []
 
     for listing in listings:
@@ -35,7 +35,9 @@ def sort_listings(listings: list["CardListing"]) -> list["CardListing"]:
     )
 
 
-def extract_price_value(price_str: str) -> Decimal:
+def extract_price_value(price_str: str | Decimal) -> Decimal:
+    if isinstance(price_str, Decimal):
+        return price_str
     if price_str == "N/A":
         return Decimal(0)
 
