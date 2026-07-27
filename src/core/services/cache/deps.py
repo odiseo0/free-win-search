@@ -13,6 +13,11 @@ _cache: Cache | None = None
 
 
 def create_cache(settings: CacheSettings) -> Cache:
+    from src.settings.api_settings import api_settings
+
+    if api_settings.environment == "production" and settings.backend != "valkey":
+        raise RuntimeError("Production requires CACHE_BACKEND=valkey")
+
     if settings.backend == "valkey":
         return ValkeyCache.from_url(
             settings.url.get_secret_value(),

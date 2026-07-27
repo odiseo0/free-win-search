@@ -2,99 +2,117 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Protocol
 
+from sqlalchemy import update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.cards.repository.model import CardListing
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class ScraperLoadResult:
     card_listings_loaded: int = 0
-
-
-class ScraperDataStore(Protocol):
-    async def upsert_card_listings(self, rows: Sequence[dict[str, object]]) -> int: ...
+    card_listings_deactivated: int = 0
 
 
 class CardListingData(Protocol):
     name: str
     set: str
     code: str
-    price: str
+    price: Decimal
     rarity: str
     condition: str
     stock: int
 
 
-def _parse_price(price: str) -> Decimal:
-    if price == "N/A":
-        return Decimal(0)
-
-    return Decimal(price.replace("$", "").replace(",", "").strip())
-
-
-def _card_listing_row(listing: CardListingData) -> dict[str, object]:
+def _card_listing_row(
+    listing: CardListingData,
+    *,
+    card_id: int,
+    ygo_id: int,
+    source: str,
+    observed_at: datetime,
+) -> dict[str, object]:
+    if not listing.code.strip() or not listing.condition.strip():
+        raise ValueError("Listing code and condition are required")
+    if listing.price < 0 or listing.stock < 0:
+        raise ValueError("Listing price and stock cannot be negative")
     return {
+        "card_id": card_id,
+        "ygo_id": ygo_id,
+        "source": source,
         "name": listing.name,
         "ygo_set": listing.set,
         "code": listing.code,
-        "price": _parse_price(listing.price),
+        "price": listing.price,
         "rarity": listing.rarity,
         "condition": listing.condition,
+        "currency": "USD",
         "stock": listing.stock,
+        "last_seen_at": observed_at,
+        "is_active": True,
+        "date_updated": observed_at,
     }
-
-
-class SQLAlchemyScraperStore:
-    def __init__(self, db: AsyncSession):
-        self.db = db
-
-    async def upsert_card_listings(self, rows: Sequence[dict[str, object]]) -> int:
-        if not rows:
-            return 0
-
-        stmt = postgresql_insert(CardListing).values(list(rows))
-        stmt = stmt.on_conflict_do_update(
-            constraint="uq_card_listings_code_condition",
-            set_={
-                "name": stmt.excluded.name,
-                "ygo_set": stmt.excluded.ygo_set,
-                "price": stmt.excluded.price,
-                "rarity": stmt.excluded.rarity,
-                "stock": stmt.excluded.stock,
-            },
-        )
-
-        await self.db.execute(stmt)
-        await self.db.commit()
-
-        return len(rows)
-
-
-async def load_scraped_data(
-    store: ScraperDataStore,
-    *,
-    card_listings: Sequence[CardListingData] = (),
-) -> ScraperLoadResult:
-    card_rows = [_card_listing_row(listing) for listing in card_listings]
-
-    card_listings_loaded = 0
-
-    if card_rows:
-        card_listings_loaded = await store.upsert_card_listings(card_rows)
-
-    return ScraperLoadResult(card_listings_loaded=card_listings_loaded)
 
 
 async def load_scraped_data_to_database(
     db: AsyncSession,
     *,
+    card_id: int,
+    ygo_id: int,
     card_listings: Sequence[CardListingData] = (),
+    source: str = "coolstuffinc",
+    confirmed_empty: bool = False,
+    observed_at: datetime | None = None,
 ) -> ScraperLoadResult:
-    return await load_scraped_data(
-        SQLAlchemyScraperStore(db), card_listings=card_listings
-    )
+    seen_at = observed_at or datetime.now(UTC)
+    rows = [
+        _card_listing_row(
+            item,
+            card_id=card_id,
+            ygo_id=ygo_id,
+            source=source,
+            observed_at=seen_at,
+        )
+        for item in card_listings
+    ]
+
+    if rows:
+        stmt = postgresql_insert(CardListing).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_card_listings_source_code_condition",
+            set_={
+                "card_id": stmt.excluded.card_id,
+                "ygo_id": stmt.excluded.ygo_id,
+                "name": stmt.excluded.name,
+                "ygo_set": stmt.excluded.ygo_set,
+                "price": stmt.excluded.price,
+                "rarity": stmt.excluded.rarity,
+                "currency": stmt.excluded.currency,
+                "stock": stmt.excluded.stock,
+                "last_seen_at": stmt.excluded.last_seen_at,
+                "is_active": True,
+                "date_updated": stmt.excluded.date_updated,
+            },
+        )
+        await db.execute(stmt)
+
+    deactivated = 0
+
+    if confirmed_empty:
+        result = await db.execute(
+            update(CardListing)
+            .where(
+                CardListing.card_id == card_id,
+                CardListing.source == source,
+                CardListing.is_active.is_(True),
+            )
+            .values(is_active=False, date_updated=seen_at)
+        )
+        deactivated = result.rowcount  # type: ignore[attr-defined]
+
+    return ScraperLoadResult(len(rows), deactivated)

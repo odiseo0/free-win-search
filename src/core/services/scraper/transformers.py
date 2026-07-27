@@ -4,6 +4,7 @@ import re
 from collections.abc import Iterable
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 
 from bs4 import BeautifulSoup
 
@@ -19,7 +20,7 @@ class CardListing:
     name: str
     set: str
     code: str
-    price: str
+    price: Decimal
     rarity: str
     condition: str
     stock: int = 0
@@ -31,7 +32,7 @@ class CollectionItem:
     set: str
     code: str
     qty: int
-    price: str
+    price: Decimal
     rarity: str
     condition: str
     stock: int
@@ -81,11 +82,11 @@ def parse_listings_from_text(soup: BeautifulSoup, card_name: str) -> list[CardLi
         if rarity_match:
             rarity = rarity_match.group(1).strip()
 
-        price = "N/A"
+        price: Decimal | None = None
         price_match = re.search(r"\$(\d+\.?\d*)", section[section.find(code) :])
 
         if price_match:
-            price = f"${price_match.group(1)}"
+            price = Decimal(price_match.group(1))
 
         stock = 0
         stock_match = re.search(
@@ -103,7 +104,7 @@ def parse_listings_from_text(soup: BeautifulSoup, card_name: str) -> list[CardLi
         elif "Played" in condition_section[:100]:
             condition = "Played"
 
-        if code and price != "N/A":
+        if code and price is not None and condition != "Unknown":
             listings.append(
                 CardListing(
                     name=card_name,
@@ -155,11 +156,19 @@ def extract_listing_from_row(row, card_name: str) -> CardListing | None:
     if stock_match:
         stock = int(stock_match.group(1))
 
-    price = "N/A"
+    price: Decimal | None = None
     price_match = re.search(r"\$\s*(\d+\.?\d*)", row_text)
 
     if price_match:
-        price = f"${price_match.group(1)}"
+        try:
+            price = Decimal(price_match.group(1))
+        except InvalidOperation:
+            return None
+
+    if price is None:
+        return None
+    if condition == "Unknown":
+        return None
 
     set_name = ""
     set_link = row.select_one("a.ItemSet.display-title")
@@ -197,13 +206,60 @@ def parse_card_listings(html: str, card_name: str) -> list[CardListing]:
 
             if listing:
                 listings.append(listing)
-        except Exception:
+        except (AttributeError, TypeError, ValueError):
             continue
 
     if not listings:
         listings = parse_listings_from_text(soup, page_card_name)
 
     return deduplicate_listings(listings)
+
+
+class ParserStructureError(ValueError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class TransformReport:
+    rows_seen: int
+    rows_valid: int
+    rows_rejected: int
+    confirmed_empty: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class TransformResult:
+    listings: list[CardListing]
+    report: TransformReport
+
+
+def transform_card_page(html: str, card_name: str) -> TransformResult:
+    soup = BeautifulSoup(html, "html.parser")
+    rows = soup.select("div.products-container div.row, div.row.product-row")
+    confirmed_empty = bool(
+        soup.select_one("div.products-container")
+        and not rows
+        and re.search(
+            r"(no (?:items|products)|0 results)", soup.get_text(), re.IGNORECASE
+        )
+    )
+    listings = parse_card_listings(html, card_name)
+
+    if rows and not listings:
+        raise ParserStructureError("Listing rows were found but none passed validation")
+
+    if not rows and not confirmed_empty and not listings:
+        raise ParserStructureError("Unrecognized listing page structure")
+
+    return TransformResult(
+        listings=listings,
+        report=TransformReport(
+            rows_seen=len(rows),
+            rows_valid=len(listings),
+            rows_rejected=max(0, len(rows) - len(listings)),
+            confirmed_empty=confirmed_empty,
+        ),
+    )
 
 
 async def transform_card_pages(

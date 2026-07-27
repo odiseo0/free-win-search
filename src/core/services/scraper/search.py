@@ -1,7 +1,7 @@
 from typing import Protocol
 
-from .scraper import scrape_cards
-from .transformers import CardListing, transform_card_pages
+from .scraper import ExtractStatus, scrape_cards
+from .transformers import CardListing, transform_card_page
 
 
 class CardListingSearch(Protocol):
@@ -9,9 +9,13 @@ class CardListingSearch(Protocol):
 
 
 class ScraperCardListingSearch:
+    """Compatibility adapter for manual callers; the API never uses it inline."""
+
     async def search(self, query: str) -> list[CardListing]:
-        pages = await scrape_cards([query])
-        return await transform_card_pages(pages)
+        extraction = (await scrape_cards([query]))[0]
+        if extraction.status is not ExtractStatus.SUCCESS or extraction.html is None:
+            return []
+        return transform_card_page(extraction.html, query).listings
 
 
 _card_listing_search: CardListingSearch = ScraperCardListingSearch()
