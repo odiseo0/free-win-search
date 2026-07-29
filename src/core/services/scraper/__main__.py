@@ -10,6 +10,7 @@ def main() -> None:
     parser.add_argument("command", choices=("once", "worker"))
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
+
     if args.command == "once":
         asyncio.run(run_once())
     else:

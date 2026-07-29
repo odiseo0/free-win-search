@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from time import monotonic
 from typing import Self
 
-import httpx
+from httpx import AsyncClient
 
 from src.api.cards.repository.model import ScrapeJob
 from src.api.cards.repository.scrape_jobs import (
@@ -44,13 +44,13 @@ class ScraperWorker:
     ) -> None:
         self.settings = settings
         self.cache = cache or get_cache()
-        self._client: httpx.AsyncClient | None = None
+        self._client: AsyncClient | None = None
         self._executor: ProcessPoolExecutor | None = None
         self._last_request_at = 0.0
         self._rate_lock = asyncio.Lock()
 
     async def __aenter__(self) -> Self:
-        self._client = httpx.AsyncClient(
+        self._client = AsyncClient(
             base_url=BASE_URL,
             headers={"User-Agent": USER_AGENT},
             timeout=self.settings.http_timeout_seconds,
