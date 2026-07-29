@@ -13,6 +13,15 @@ from src.core.utils import deduplicate_listings
 # make the parse executor reusable to the whole app.
 _PARSE_EXECUTOR: ProcessPoolExecutor | None = None
 PARSE_MAX_WORKERS = max(1, os.process_cpu_count() or 1)
+_CARD_CODE_PATTERN = re.compile(r"[A-Z]{2,4}\d*-(?:[A-Z]{2,3})?\d+")
+_TEXT_CARD_CODE_PATTERN = re.compile(rf"Card #:\s*({_CARD_CODE_PATTERN.pattern})")
+_RARITY_PATTERN = re.compile(
+    r"Rarity:\s*([A-Za-z][A-Za-z\s]*?)"
+    r"(?=\s*(?:Card\s*#|\(|Only\b|In Stock\b|Out\b|\$|$))"
+)
+_PRICE_PATTERN = re.compile(r"\$\s*(\d+\.?\d*)")
+_STOCK_PATTERN = re.compile(r"(?:Only\s+)?(\d+)\s+In Stock")
+_CONDITIONS = ("Near Mint", "Played")
 
 
 @dataclass
@@ -42,6 +51,62 @@ class CollectionItem:
         return f"{self.code}:{self.condition}"
 
 
+@dataclass(frozen=True, slots=True)
+class _ListingDetails:
+    price: Decimal
+    rarity: str
+    condition: str
+    stock: int
+
+
+def _extract_listing_details(
+    context: str, *, product_text: str | None = None
+) -> _ListingDetails | None:
+    product_text = product_text if product_text is not None else context
+
+    price_match = _PRICE_PATTERN.search(product_text)
+    condition = next(
+        (value for value in _CONDITIONS if value in product_text[:100]),
+        None,
+    )
+
+    if price_match is None or condition is None:
+        return None
+
+    try:
+        price = Decimal(price_match.group(1))
+    except InvalidOperation:
+        return None
+
+    rarity_match = _RARITY_PATTERN.search(context)
+    stock_match = _STOCK_PATTERN.search(product_text)
+
+    return _ListingDetails(
+        price=price,
+        rarity=rarity_match.group(1).strip() if rarity_match else "Unknown",
+        condition=condition,
+        stock=int(stock_match.group(1)) if stock_match else 0,
+    )
+
+
+def _build_listing(
+    *,
+    name: str,
+    set_name: str,
+    code: str,
+    details: _ListingDetails,
+) -> CardListing:
+    return CardListing(
+        name=name,
+        set=set_name,
+        code=code,
+        price=details.price,
+        rarity=details.rarity,
+        condition=details.condition,
+        stock=details.stock,
+    )
+
+
 def _get_parse_executor() -> ProcessPoolExecutor:
     global _PARSE_EXECUTOR
 
@@ -60,60 +125,25 @@ def parse_listings_from_text(soup: BeautifulSoup, card_name: str) -> list[CardLi
     listings: list[CardListing] = []
     full_text = soup.get_text()
 
-    code_pattern = re.compile(r"Card #:\s*([A-Z]{2,4}\d*-(?:[A-Z]{2,3})?\d+)")
-    codes = code_pattern.findall(full_text)
-
-    for code in codes:
-        code_pos = full_text.find("Card #:" + code)
-
-        if code_pos == -1:
-            code_pos = full_text.find(code)
-
-        if code_pos == -1:
-            continue
-
+    for code_match in _TEXT_CARD_CODE_PATTERN.finditer(full_text):
+        code = code_match.group(1)
+        code_pos = code_match.start()
         start = max(0, code_pos - 500)
         end = min(len(full_text), code_pos + 300)
         section = full_text[start:end]
-
-        rarity = "Unknown"
-        rarity_match = re.search(r"Rarity:\s*([A-Za-z\s]+?)(?:Card #|$)", section)
-
-        if rarity_match:
-            rarity = rarity_match.group(1).strip()
-
-        price: Decimal | None = None
-        price_match = re.search(r"\$(\d+\.?\d*)", section[section.find(code) :])
-
-        if price_match:
-            price = Decimal(price_match.group(1))
-
-        stock = 0
-        stock_match = re.search(
-            r"(?:Only\s+)?(\d+)\s+In Stock", section[section.find(code) :]
+        product_text = section[section.find(code) :]
+        details = _extract_listing_details(
+            section,
+            product_text=product_text,
         )
 
-        if stock_match:
-            stock = int(stock_match.group(1))
-
-        condition = "Unknown"
-        condition_section = section[section.find(code) :]
-
-        if "Near Mint" in condition_section[:100]:
-            condition = "Near Mint"
-        elif "Played" in condition_section[:100]:
-            condition = "Played"
-
-        if code and price is not None and condition != "Unknown":
+        if details is not None:
             listings.append(
-                CardListing(
+                _build_listing(
                     name=card_name,
-                    set="",
+                    set_name="",
                     code=code,
-                    price=price,
-                    rarity=rarity,
-                    condition=condition,
-                    stock=stock,
+                    details=details,
                 )
             )
 
@@ -122,52 +152,18 @@ def parse_listings_from_text(soup: BeautifulSoup, card_name: str) -> list[CardLi
 
 def extract_listing_from_row(row, card_name: str) -> CardListing | None:
     row_text = row.get_text()
-
-    if "$" not in row_text:
-        return None
-
-    code_pattern = re.compile(r"[A-Z]{2,4}\d*-(?:[A-Z]{2,3})?\d+")
-    code_match = code_pattern.search(row_text)
+    code_match = _CARD_CODE_PATTERN.search(row_text)
 
     if not code_match:
         return None
 
     code = code_match.group(0)
-
-    rarity = "Unknown"
-    rarity_match = re.search(
-        r"Rarity:\s*([A-Za-z\s]+?)(?:\s*Card #|\s*\(|\s*Only|\s*In Stock|\s*Out)",
+    details = _extract_listing_details(
         row_text,
+        product_text=row_text[code_match.start() :],
     )
 
-    if rarity_match:
-        rarity = rarity_match.group(1).strip()
-
-    condition = "Unknown"
-
-    if "Near Mint" in row_text:
-        condition = "Near Mint"
-    elif "Played" in row_text:
-        condition = "Played"
-
-    stock = 0
-    stock_match = re.search(r"(?:Only\s+)?(\d+)\s+In Stock", row_text)
-
-    if stock_match:
-        stock = int(stock_match.group(1))
-
-    price: Decimal | None = None
-    price_match = re.search(r"\$\s*(\d+\.?\d*)", row_text)
-
-    if price_match:
-        try:
-            price = Decimal(price_match.group(1))
-        except InvalidOperation:
-            return None
-
-    if price is None:
-        return None
-    if condition == "Unknown":
+    if details is None:
         return None
 
     set_name = ""
@@ -176,14 +172,11 @@ def extract_listing_from_row(row, card_name: str) -> CardListing | None:
     if set_link is not None:
         set_name = set_link.get_text(strip=True)
 
-    return CardListing(
+    return _build_listing(
         name=f"{card_name} - {set_name}",
-        set=set_name,
+        set_name=set_name,
         code=code,
-        price=price,
-        rarity=rarity,
-        condition=condition,
-        stock=stock,
+        details=details,
     )
 
 

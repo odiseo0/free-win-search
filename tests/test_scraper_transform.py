@@ -5,6 +5,7 @@ import pytest
 from src.core.services.scraper.transformers import (
     CardListing,
     ParserStructureError,
+    parse_card_listings,
     transform_card_page,
 )
 from src.core.utils import deduplicate_listings
@@ -30,6 +31,23 @@ def test_transform_validates_decimal_and_metadata() -> None:
     assert result.listings[0].price == Decimal("12.50")
     assert result.listings[0].stock == 3
     assert result.listings[0].condition == "Near Mint"
+
+
+def test_text_fallback_uses_the_same_listing_detail_rules() -> None:
+    html = """
+    <html><body>
+      <p>Rarity: Rare Card #: LOB-005 Played Only 2 In Stock $1.25</p>
+    </body></html>
+    """
+
+    listings = parse_card_listings(html, "Dark Magician")
+
+    assert len(listings) == 1
+    assert listings[0].code == "LOB-005"
+    assert listings[0].price == Decimal("1.25")
+    assert listings[0].rarity == "Rare"
+    assert listings[0].condition == "Played"
+    assert listings[0].stock == 2
 
 
 def test_transform_rejects_unrecognized_success_page() -> None:

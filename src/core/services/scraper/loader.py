@@ -39,8 +39,10 @@ def _card_listing_row(
 ) -> dict[str, object]:
     if not listing.code.strip() or not listing.condition.strip():
         raise ValueError("Listing code and condition are required")
+
     if listing.price < 0 or listing.stock < 0:
         raise ValueError("Listing price and stock cannot be negative")
+
     return {
         "card_id": card_id,
         "ygo_id": ygo_id,
