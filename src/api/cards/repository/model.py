@@ -126,7 +126,10 @@ class ScrapeJob(Date, Base, kw_only=True):
     )
 
     id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True), primary_key=True, default_factory=uuid4
+        PGUUID(as_uuid=True),
+        primary_key=True,
+        default_factory=uuid4,
+        insert_default=uuid4,
     )
     target_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("scrape_targets.id", ondelete="CASCADE"), index=True

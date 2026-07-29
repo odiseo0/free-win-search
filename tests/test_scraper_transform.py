@@ -3,9 +3,11 @@ from decimal import Decimal
 import pytest
 
 from src.core.services.scraper.transformers import (
+    CardListing,
     ParserStructureError,
     transform_card_page,
 )
+from src.core.utils import deduplicate_listings
 
 
 VALID_HTML = """
@@ -55,3 +57,26 @@ def test_transform_accepts_only_unequivocal_empty_page() -> None:
 
     assert result.listings == []
     assert result.report.confirmed_empty is True
+
+
+def test_deduplication_matches_database_identity_and_keeps_last_row() -> None:
+    generic = CardListing(
+        name="Cyber Dragon - Promo",
+        set="Promo",
+        code="YS18-EN014",
+        price=Decimal("6.99"),
+        rarity="Secret Rare",
+        condition="Near Mint",
+        stock=20,
+    )
+    specific = CardListing(
+        name="Cyber Dragon - Starter Deck: Codebreaker",
+        set="Starter Deck: Codebreaker",
+        code="ys18-en014",
+        price=Decimal("0.39"),
+        rarity="Common",
+        condition="Near Mint",
+        stock=1,
+    )
+
+    assert deduplicate_listings([generic, specific]) == [specific]

@@ -2,6 +2,7 @@ from typing import Annotated, assert_never
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.cards.application import (
@@ -72,7 +73,7 @@ async def search_card_listings(
 
     match result:
         case Ok(ScrapeAcceptedResponse() as accepted):
-            return Response(
+            return JSONResponse(
                 status_code=status.HTTP_202_ACCEPTED,
                 content=accepted.model_dump(mode="json"),
                 headers={"Retry-After": str(accepted.retry_after_seconds)},

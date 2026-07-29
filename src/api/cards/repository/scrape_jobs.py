@@ -1,15 +1,38 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from sqlalchemy import and_, or_, select, text
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import Select, and_, or_, select, text
+from sqlalchemy.dialects.postgresql import Insert, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .model import Card, ScrapeJob, ScrapeTarget
 
 ACTIVE_JOB_STATUSES = ("pending", "running", "retry_wait")
+
+
+def build_job_insert(
+    *,
+    target_id: int,
+    priority: int,
+    available_at: datetime | None = None,
+) -> Insert:
+    return (
+        insert(ScrapeJob)
+        .values(
+            id=uuid4(),
+            target_id=target_id,
+            priority=priority,
+            status="pending",
+            available_at=available_at or datetime.now(UTC),
+        )
+        .on_conflict_do_nothing(
+            index_elements=[ScrapeJob.target_id],
+            index_where=text("status IN ('pending', 'running', 'retry_wait')"),
+        )
+        .returning(ScrapeJob.id)
+    )
 
 
 async def enqueue_for_card(
@@ -40,19 +63,10 @@ async def enqueue_for_card(
     )
     target_id = (await db.execute(target_insert)).scalar_one()
 
-    job_insert = (
-        insert(ScrapeJob)
-        .values(
-            target_id=target_id,
-            priority=priority,
-            status="pending",
-            available_at=requested_at,
-        )
-        .on_conflict_do_nothing(
-            index_elements=[ScrapeJob.target_id],
-            index_where=text("status IN ('pending', 'running', 'retry_wait')"),
-        )
-        .returning(ScrapeJob.id)
+    job_insert = build_job_insert(
+        target_id=target_id,
+        priority=priority,
+        available_at=requested_at,
     )
     job_id = (await db.execute(job_insert)).scalar_one_or_none()
 
@@ -82,13 +96,7 @@ async def get_job(db: AsyncSession, job_id: UUID) -> ScrapeJob | None:
     ).scalar_one_or_none()
 
 
-async def claim_next_job(
-    db: AsyncSession,
-    *,
-    lease_seconds: int,
-    now: datetime | None = None,
-) -> ScrapeJob | None:
-    claimed_at = now or datetime.now(UTC)
+def build_claim_statement(claimed_at: datetime) -> Select[tuple[ScrapeJob]]:
     claimable = or_(
         and_(
             ScrapeJob.status.in_(("pending", "retry_wait")),
@@ -99,13 +107,25 @@ async def claim_next_job(
             ScrapeJob.lease_expires_at <= claimed_at,
         ),
     )
-    statement = (
+    return (
         select(ScrapeJob)
         .where(claimable)
         .order_by(ScrapeJob.priority.desc(), ScrapeJob.available_at.asc())
-        .with_for_update(skip_locked=True)
+        # ScrapeJob.target is joined eagerly with a LEFT OUTER JOIN. PostgreSQL
+        # rejects locking the nullable side, so only the queue row is locked.
+        .with_for_update(skip_locked=True, of=ScrapeJob)
         .limit(1)
     )
+
+
+async def claim_next_job(
+    db: AsyncSession,
+    *,
+    lease_seconds: int,
+    now: datetime | None = None,
+) -> ScrapeJob | None:
+    claimed_at = now or datetime.now(UTC)
+    statement = build_claim_statement(claimed_at)
     job = (await db.execute(statement)).scalar_one_or_none()
 
     if job is None:
@@ -135,9 +155,12 @@ async def mark_job_succeeded(
     finished_at = now or datetime.now(UTC)
     job = (
         await db.execute(
-            select(ScrapeJob).where(ScrapeJob.id == job_id).with_for_update()
+            select(ScrapeJob)
+            .where(ScrapeJob.id == job_id)
+            .with_for_update(of=ScrapeJob)
         )
     ).scalar_one()
+
     job.status = "succeeded"
     job.finished_at = finished_at
     job.lease_expires_at = None
@@ -158,7 +181,9 @@ async def mark_job_failed(
     failed_at = now or datetime.now(UTC)
     job = (
         await db.execute(
-            select(ScrapeJob).where(ScrapeJob.id == job_id).with_for_update()
+            select(ScrapeJob)
+            .where(ScrapeJob.id == job_id)
+            .with_for_update(of=ScrapeJob)
         )
     ).scalar_one()
     terminal = job.attempts >= max_attempts

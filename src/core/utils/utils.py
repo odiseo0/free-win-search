@@ -15,17 +15,19 @@ class CardListing(Protocol):
 
 
 def deduplicate_listings(listings: list["CardListing"]) -> list["CardListing"]:
-    seen: set[tuple[str, str, Decimal]] = set()
-    unique: list[CardListing] = []
+    unique_by_identity: dict[tuple[str, str], CardListing] = {}
 
     for listing in listings:
-        key = (listing.code, listing.condition, listing.price)
+        # Persistence identity is (source, code, condition). Transformation
+        # handles one source at a time, so source is constant here. A repeated
+        # row later in the page replaces an earlier generic row.
+        key = (
+            listing.code.strip().upper(),
+            listing.condition.strip().casefold(),
+        )
+        unique_by_identity[key] = listing
 
-        if key not in seen:
-            seen.add(key)
-            unique.append(listing)
-
-    return unique
+    return list(unique_by_identity.values())
 
 
 def sort_listings(listings: list["CardListing"]) -> list["CardListing"]:
