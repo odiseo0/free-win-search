@@ -1,5 +1,3 @@
-from enum import Enum, EnumMeta
-
 from pydantic import BaseModel as _BaseModel
 from pydantic.alias_generators import to_camel
 
@@ -12,8 +10,4 @@ class BaseModel(_BaseModel):
         "arbitrary_types_allowed": True,
         "protected_namespaces": (),
         "alias_generator": to_camel,
-        "json_encoders": {
-            Enum: lambda enum: enum.value if enum else None,
-            EnumMeta: None,
-        },
     }

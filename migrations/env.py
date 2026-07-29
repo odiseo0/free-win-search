@@ -13,8 +13,10 @@ from src.settings.db_settings import db_settings
 
 config = context.config
 config.set_main_option("sqlalchemy.url", db_settings.SQLALCHEMY_DATABASE_URI)
+
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+
 target_metadata = Base.metadata
 
 VERSION_TABLE = "free_win_search_alembic_version"
@@ -36,8 +38,10 @@ def include_name(
 ) -> bool:
     """Keep autogenerate isolated from tables owned by Free Win Orders."""
     del parent_names
+
     if type_ == "table":
         return name in OWNED_TABLES
+
     return True
 
 
@@ -50,6 +54,7 @@ def do_run_migrations(connection) -> None:
         include_name=include_name,
         version_table=VERSION_TABLE,
     )
+
     with context.begin_transaction():
         context.run_migrations()
 
@@ -60,8 +65,10 @@ async def run_async_migrations() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
+
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)
+
     await connectable.dispose()
 
 

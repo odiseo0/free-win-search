@@ -81,6 +81,7 @@ async def enqueue_for_card(
         ).scalar_one()
 
     await db.commit()
+
     return (
         await db.execute(
             select(ScrapeJob)
@@ -107,6 +108,7 @@ def build_claim_statement(claimed_at: datetime) -> Select[tuple[ScrapeJob]]:
             ScrapeJob.lease_expires_at <= claimed_at,
         ),
     )
+
     return (
         select(ScrapeJob)
         .where(claimable)
