@@ -1,8 +1,7 @@
 import json
 from collections.abc import Sequence
 
-from pydantic import BaseModel
-
+from src.core.schema import BaseModel
 from src.core.services.cache import Cache
 
 

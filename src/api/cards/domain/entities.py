@@ -44,6 +44,7 @@ class Card(BaseModel):
             "Precios de referencia recibidos de la fuente externa; no representan "
             "el precio definitivo de una Orden."
         ),
+        examples=[0.79, 1.00, 6.99],
     )
     images: dict[str, Any] | None = Field(
         default=None,
@@ -78,6 +79,7 @@ class CardCreate(Card):
             "Precios externos de referencia; no representan el precio definitivo "
             "de una Orden."
         ),
+        examples=[0.79, 1.00, 6.99],
     )
     images: dict[str, Any] = Field(
         default=...,
@@ -119,7 +121,8 @@ class CardListingResponse(BaseModel):
     name: str = Field(description="Nombre de la carta en la publicación.")
     code: str = Field(description="Código de set de la publicación.")
     price: Decimal = Field(
-        description="Precio unitario observado en la fuente externa, en USD."
+        description="Precio unitario observado en la fuente externa, en USD.",
+        examples=[0.79, 1.00, 6.99],
     )
     rarity: str = Field(description="Rareza anunciada.")
     condition: str = Field(description="Condición anunciada.")

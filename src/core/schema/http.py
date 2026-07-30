@@ -33,23 +33,23 @@ class PaginatedResponse[T](BaseModel):
     total: int = Field(ge=0)
 
 
-UNAUTHORIZED_RESPONSE = {
+UNAUTHORIZED_RESPONSE: dict[str, type[ErrorResponse] | str] = {
     "model": ErrorResponse,
     "description": "No existe una identidad autenticada válida.",
 }
-FORBIDDEN_RESPONSE = {
+FORBIDDEN_RESPONSE: dict[str, type[ErrorResponse] | str] = {
     "model": ErrorResponse,
     "description": "La identidad no posee el permiso requerido.",
 }
-NOT_FOUND_RESPONSE = {
+NOT_FOUND_RESPONSE: dict[str, type[ErrorResponse] | str] = {
     "model": ErrorResponse,
     "description": "El recurso solicitado no existe o no es visible.",
 }
-CONFLICT_RESPONSE = {
+CONFLICT_RESPONSE: dict[str, type[ErrorResponse] | str] = {
     "model": ErrorResponse,
     "description": "La operación entra en conflicto con el estado actual del recurso.",
 }
-VALIDATION_RESPONSE = {
+VALIDATION_RESPONSE: dict[str, type[ValidationErrorResponse] | str] = {
     "model": ValidationErrorResponse,
     "description": "La entrada no cumple el contrato de la operación.",
 }
