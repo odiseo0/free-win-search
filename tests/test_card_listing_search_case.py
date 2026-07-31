@@ -97,7 +97,8 @@ def test_cold_miss_returns_job_and_stale_data_revalidates(
 
         monkeypatch.setattr(cases.dao, "for_card", rows)
         stale_target = SimpleNamespace(
-            next_refresh_at=datetime.now(UTC) - timedelta(seconds=1)
+            next_refresh_at=datetime.now(UTC) - timedelta(seconds=1),
+            is_enabled=True,
         )
         return await cases.search(
             FakeDB(stale_target), SimpleNamespace(), "Dark Magician"
@@ -138,3 +139,34 @@ def test_unknown_query_never_enqueues(monkeypatch) -> None:
     assert isinstance(result, Ok)
     assert isinstance(result.value, list)
     assert result.value[0].ygo_id == 46986414
+
+
+def test_disabled_404_target_never_enqueues(monkeypatch) -> None:
+    card = SimpleNamespace(id=10, ygo_id=46986414, name="Dark Magician")
+
+    async def no_cache(*_: object, **__: object):
+        return None
+
+    async def no_op(*_: object, **__: object) -> None:
+        return None
+
+    async def resolve(*_: object, **__: object):
+        return card
+
+    async def no_rows(*_: object, **__: object):
+        return []
+
+    async def forbidden_enqueue(*_: object, **__: object):
+        raise AssertionError("A disabled target must not enqueue")
+
+    monkeypatch.setattr(cases, "get_cached_models", no_cache)
+    monkeypatch.setattr(cases, "set_cached_models", no_op)
+    monkeypatch.setattr(cases.dao_cards, "resolve_canonical", resolve)
+    monkeypatch.setattr(cases.dao, "for_card", no_rows)
+    monkeypatch.setattr(cases, "enqueue_for_card", forbidden_enqueue)
+
+    target = SimpleNamespace(is_enabled=False, next_refresh_at=None)
+    result = asyncio.run(cases.search(FakeDB(target), SimpleNamespace(), card.name))
+
+    assert isinstance(result, Ok)
+    assert result.value == []

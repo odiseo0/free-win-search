@@ -61,3 +61,54 @@ con datos frescos devuelve `200`; si están vencidos devuelve los datos actuales
 encola el refresco. Un cold miss devuelve `202` con `job_id` y el estado se consulta
 en `GET /card-listings/jobs/{job_id}`. Una consulta ambigua puede leer listings
 existentes, pero nunca crea objetivos arbitrarios ni acepta URLs externas.
+
+## Backfill de cartas sin publicaciones
+
+Despues de aplicar las migraciones, inspecciona primero cuantos trabajos se
+programarian. Este modo no modifica PostgreSQL ni crea un checkpoint:
+
+```shell
+pdm run python -m src.core.services.scraper backfill-missing --dry-run
+```
+
+Para programarlos, ejecuta:
+
+```shell
+pdm run python -m src.core.services.scraper backfill-missing
+```
+
+El comando crea lotes de hasta 50 cartas. No permanece esperando: guarda cada
+lote en PostgreSQL y asigna a sus trabajos un `available_at` separado del lote
+siguiente por un intervalo aleatorio de 5 a 30 minutos. Los trabajos de backfill
+usan prioridad `-10`, por lo que una busqueda interactiva con prioridad `0` se
+atiende antes. El worker debe ejecutarse como un proceso separado.
+
+El progreso durable se escribe atomicamente en
+`var/scraper/missing-listings-backfill.json`. Si el proceso falla, la siguiente
+ejecucion reanuda desde `last_card_id`. Una ejecucion terminada inicia un nuevo
+recorrido completo. Para descartar deliberadamente un recorrido incompleto y
+archivar su checkpoint usa:
+
+```shell
+pdm run python -m src.core.services.scraper backfill-missing --restart
+```
+
+El path y los valores predeterminados se pueden configurar con
+`SCRAPER_BACKFILL_STATE_PATH`, `SCRAPER_BACKFILL_BATCH_SIZE`,
+`SCRAPER_BACKFILL_MIN_INTERVAL_MINUTES`,
+`SCRAPER_BACKFILL_MAX_INTERVAL_MINUTES` y `SCRAPER_BACKFILL_PRIORITY`. Tambien
+existen flags equivalentes en el comando.
+
+Un 404 es terminal: el target queda deshabilitado y no se vuelve a programar
+automaticamente. Tras corregir el nombre o verificar la carta, se habilita de
+nuevo sin crear un trabajo con uno de estos comandos:
+
+```shell
+pdm run python -m src.core.services.scraper reset-target --ygo-id 46986414
+pdm run python -m src.core.services.scraper reset-target --card-id 2854
+```
+
+Las respuestas validas con al menos una publicacion en stock se refrescan una
+hora despues. Si todas tienen stock cero, o la pagina confirma que no hay
+publicaciones, el siguiente refresco queda disponible seis horas despues. Las
+publicaciones con stock cero se conservan en `card_listings`.
