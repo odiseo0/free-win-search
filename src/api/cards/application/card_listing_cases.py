@@ -135,13 +135,14 @@ async def search(
         await db.execute(select(ScrapeTarget).where(ScrapeTarget.card_id == card.id))
     ).scalar_one_or_none()
     now = datetime.now(UTC)
+    unavailable = target is not None and not target.is_enabled
     fresh = (
         target is not None
         and target.next_refresh_at is not None
         and target.next_refresh_at > now
     )
 
-    if fresh:
+    if unavailable or fresh:
         await set_cached_models(
             cache, key, response, ttl_seconds=CARD_LISTING_CACHE_TTL_SECONDS
         )
@@ -149,6 +150,9 @@ async def search(
         return Ok(response)
 
     job = await enqueue_for_card(db, card, now=now)
+
+    if job is None:
+        return Ok(response)
 
     if response:
         return Ok(response)
