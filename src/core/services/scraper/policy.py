@@ -2,18 +2,11 @@ from datetime import datetime, timedelta
 
 
 def next_refresh_at(
-    last_requested_at: datetime,
     now: datetime,
-) -> datetime | None:
-    demand_age = now - last_requested_at
+    *,
+    in_stock_count: int,
+) -> datetime:
+    """Choose the next refresh from the observed inventory state."""
+    hours = 1 if in_stock_count > 0 else 6
 
-    if demand_age <= timedelta(hours=1):
-        return now + timedelta(hours=1)
-
-    if demand_age <= timedelta(hours=6):
-        return now + timedelta(hours=3)
-
-    if demand_age <= timedelta(hours=24):
-        return now + timedelta(hours=6)
-
-    return None
+    return now + timedelta(hours=hours)

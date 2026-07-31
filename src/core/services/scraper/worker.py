@@ -121,6 +121,9 @@ class ScraperWorker:
             now = datetime.now(UTC)
 
             async with async_session_factory() as db:
+                in_stock_count = sum(
+                    1 for listing in transformed.listings if listing.stock > 0
+                )
                 await load_scraped_data_to_database(
                     db,
                     card_id=job.target.card_id,
@@ -133,7 +136,10 @@ class ScraperWorker:
                     db,
                     job.id,
                     result_count=len(transformed.listings),
-                    next_refresh_at=next_refresh_at(job.target.last_requested_at, now),
+                    in_stock_count=in_stock_count,
+                    next_refresh_at=next_refresh_at(
+                        now, in_stock_count=in_stock_count
+                    ),
                     now=now,
                 )
                 await db.commit()
@@ -153,6 +159,7 @@ class ScraperWorker:
                 attempt=job.attempts,
                 duration_seconds=round(monotonic() - started, 3),
                 result_count=len(transformed.listings),
+                in_stock_count=in_stock_count,
             )
 
             return True
@@ -197,6 +204,8 @@ class ScraperWorker:
                 error_code=error_code,
                 max_attempts=self.settings.max_attempts,
                 retry_delay_seconds=jittered_delay,
+                terminal=error_code == ExtractStatus.NOT_FOUND.value,
+                disable_target=error_code == ExtractStatus.NOT_FOUND.value,
             )
 
     async def run_forever(self) -> None:
