@@ -41,7 +41,7 @@ async def enqueue_for_card(
     *,
     priority: int = 0,
     now: datetime | None = None,
-) -> ScrapeJob:
+) -> ScrapeJob | None:
     requested_at = now or datetime.now(UTC)
     target_insert = (
         insert(ScrapeTarget)
@@ -58,10 +58,16 @@ async def enqueue_for_card(
                 "ygo_id": card.ygo_id,
                 "last_requested_at": requested_at,
             },
+            where=ScrapeTarget.is_enabled.is_(True),
         )
         .returning(ScrapeTarget.id)
     )
-    target_id = (await db.execute(target_insert)).scalar_one()
+    target_id = (await db.execute(target_insert)).scalar_one_or_none()
+
+    if target_id is None:
+        await db.rollback()
+
+        return None
 
     job_insert = build_job_insert(
         target_id=target_id,
@@ -151,6 +157,7 @@ async def mark_job_succeeded(
     job_id: UUID,
     *,
     result_count: int,
+    in_stock_count: int,
     next_refresh_at: datetime | None,
     now: datetime | None = None,
 ) -> None:
@@ -169,6 +176,7 @@ async def mark_job_succeeded(
     job.target.last_succeeded_at = finished_at
     job.target.next_refresh_at = next_refresh_at
     job.target.last_result_count = result_count
+    job.target.last_in_stock_count = in_stock_count
 
 
 async def mark_job_failed(
@@ -178,6 +186,8 @@ async def mark_job_failed(
     error_code: str,
     max_attempts: int,
     retry_delay_seconds: int,
+    terminal: bool = False,
+    disable_target: bool = False,
     now: datetime | None = None,
 ) -> str:
     failed_at = now or datetime.now(UTC)
@@ -188,19 +198,57 @@ async def mark_job_failed(
             .with_for_update(of=ScrapeJob)
         )
     ).scalar_one()
-    terminal = job.attempts >= max_attempts
-    job.status = "failed" if terminal else "retry_wait"
+    is_terminal = terminal or job.attempts >= max_attempts
+    job.status = "failed" if is_terminal else "retry_wait"
     job.error_code = error_code
     job.lease_expires_at = None
 
-    if terminal:
+    if is_terminal:
         job.finished_at = failed_at
     else:
         job.available_at = failed_at + timedelta(seconds=retry_delay_seconds)
 
+    if disable_target:
+        job.target.is_enabled = False
+        job.target.disabled_reason = error_code
+        job.target.disabled_at = failed_at
+        job.target.next_refresh_at = None
+
     await db.commit()
 
     return job.status
+
+
+async def reset_target(
+    db: AsyncSession,
+    *,
+    card_id: int | None = None,
+    ygo_id: int | None = None,
+) -> ScrapeTarget | None:
+    if (card_id is None) == (ygo_id is None):
+        raise ValueError("Provide exactly one of card_id or ygo_id")
+
+    predicate = (
+        ScrapeTarget.card_id == card_id
+        if card_id is not None
+        else ScrapeTarget.ygo_id == ygo_id
+    )
+    target = (
+        await db.execute(select(ScrapeTarget).where(predicate).with_for_update())
+    ).scalar_one_or_none()
+
+    if target is None:
+        await db.rollback()
+
+        return None
+
+    target.is_enabled = True
+    target.disabled_reason = None
+    target.disabled_at = None
+    target.next_refresh_at = None
+    await db.commit()
+
+    return target
 
 
 async def backlog_size(db: AsyncSession) -> int:

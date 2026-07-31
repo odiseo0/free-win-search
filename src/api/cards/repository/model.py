@@ -90,6 +90,13 @@ class CardListing(Date, Base, kw_only=True):
 
 
 class ScrapeTarget(Date, Base, kw_only=True):
+    __table_args__ = (
+        CheckConstraint(
+            "last_in_stock_count >= 0",
+            name="last_in_stock_count_non_negative",
+        ),
+    )
+
     id: Mapped[int] = mapped_column(
         BigInteger, init=False, autoincrement=True, primary_key=True
     )
@@ -111,6 +118,14 @@ class ScrapeTarget(Date, Base, kw_only=True):
         DateTime(timezone=True), default=None, nullable=True
     )
     last_result_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_in_stock_count: Mapped[int] = mapped_column(Integer, default=0)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    disabled_reason: Mapped[str | None] = mapped_column(
+        String(64), default=None, nullable=True
+    )
+    disabled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None, nullable=True
+    )
 
 
 class ScrapeJob(Date, Base, kw_only=True):
