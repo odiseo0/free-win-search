@@ -18,7 +18,8 @@ os.environ.setdefault(
     "postgresql+asyncpg://test:test@localhost:5432/free_win_test",
 )
 
-from src.core.services.scraper.backfill import (  # noqa: E402
+from src.core.services.scraper import backfill as backfill_module
+from src.core.services.scraper.backfill import (
     BackfillConfig,
     BackfillState,
     BackfillStateError,
@@ -30,7 +31,6 @@ from src.core.services.scraper.backfill import (  # noqa: E402
     enqueue_card_batch,
     run_missing_listings_backfill,
 )
-from src.core.services.scraper import backfill as backfill_module  # noqa: E402
 
 
 class ScalarResult:
@@ -89,8 +89,8 @@ def test_batch_enqueue_commits_once_and_uses_one_available_at() -> None:
 
     result = asyncio.run(
         enqueue_card_batch(
-            db,  # type: ignore[arg-type]
-            cards,  # type: ignore[arg-type]
+            db,
+            cards,
             priority=-10,
             available_at=available_at,
             requested_at=available_at - timedelta(minutes=1),
@@ -101,6 +101,7 @@ def test_batch_enqueue_commits_once_and_uses_one_available_at() -> None:
     assert result.jobs_reused == 0
     assert db.commits == 1
     job_statements = [db.statements[1], db.statements[3]]
+
     for statement in job_statements:
         parameters = statement.compile(dialect=postgresql.dialect()).params
         assert parameters["available_at"] == available_at
@@ -202,6 +203,84 @@ def test_read_state_rejects_corrupt_json(tmp_path: Path) -> None:
         _read_state(path)
 
 
+def test_version_one_checkpoint_migrates_its_batch_reference(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    reference = datetime(2026, 7, 31, 18, 15, tzinfo=UTC).isoformat()
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "run_id": "legacy-run",
+                "status": "failed",
+                "started_at": reference,
+                "updated_at": reference,
+                "completed_at": None,
+                "last_card_id": 50,
+                "next_batch_available_at": reference,
+                "config": {
+                    "batch_size": 50,
+                    "min_interval_minutes": 5,
+                    "max_interval_minutes": 30,
+                    "priority": -10,
+                },
+                "batches_committed": 1,
+                "jobs_created": 50,
+                "jobs_reused": 0,
+                "cards_skipped": 0,
+                "error": "RuntimeError: interrupted",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state = _read_state(path)
+
+    assert state is not None
+    assert state.version == 3
+    assert state.next_batch_available_at == reference
+
+
+def test_version_two_checkpoint_moves_after_its_last_individual_job(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "state.json"
+    reference = datetime(2026, 7, 31, 18, 15, tzinfo=UTC)
+    path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "run_id": "individual-jobs-run",
+                "status": "failed",
+                "started_at": reference.isoformat(),
+                "updated_at": reference.isoformat(),
+                "completed_at": None,
+                "last_card_id": 50,
+                "last_job_available_at": reference.isoformat(),
+                "config": {
+                    "batch_size": 50,
+                    "min_interval_minutes": 5,
+                    "max_interval_minutes": 30,
+                    "priority": -10,
+                },
+                "batches_committed": 1,
+                "jobs_created": 50,
+                "jobs_reused": 0,
+                "cards_skipped": 0,
+                "error": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state = _read_state(path)
+
+    assert state is not None
+    assert state.version == 3
+    assert (
+        state.next_batch_available_at == (reference + timedelta(minutes=30)).isoformat()
+    )
+
+
 def test_scheduler_persists_batches_with_random_available_at_gaps(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -262,9 +341,7 @@ def test_scheduler_persists_batches_with_random_available_at_gaps(
     assert result.batches_committed == 2
     assert result.jobs_created == 2
     assert len(scheduled) == 2
-    assert timedelta(minutes=5) <= scheduled[1] - scheduled[0] <= timedelta(
-        minutes=30
-    )
+    assert timedelta(minutes=5) <= scheduled[1] - scheduled[0] <= timedelta(minutes=30)
     assert checkpoint is not None
     assert checkpoint.last_card_id == 2
     assert checkpoint.status == "completed"

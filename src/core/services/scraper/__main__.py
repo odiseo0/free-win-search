@@ -56,8 +56,16 @@ def main() -> None:
         default=scraper_settings.backfill_state_path,
     )
     backfill.add_argument("--batch-size", type=int)
-    backfill.add_argument("--min-interval-minutes", type=int)
-    backfill.add_argument("--max-interval-minutes", type=int)
+    backfill.add_argument(
+        "--min-interval-minutes",
+        type=int,
+        help="Minimum delay between batches",
+    )
+    backfill.add_argument(
+        "--max-interval-minutes",
+        type=int,
+        help="Maximum delay between batches",
+    )
     backfill.add_argument("--priority", type=int)
     backfill.add_argument("--dry-run", action="store_true")
     backfill.add_argument(

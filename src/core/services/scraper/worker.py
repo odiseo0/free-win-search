@@ -116,7 +116,7 @@ class ScraperWorker:
                 self._executor,
                 transform_card_page,
                 extraction.html,
-                job.target.canonical_name,
+                extraction.card_name,
             )
             now = datetime.now(UTC)
 

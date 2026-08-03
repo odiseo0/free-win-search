@@ -77,9 +77,11 @@ Para programarlos, ejecuta:
 pdm run python -m src.core.services.scraper backfill-missing
 ```
 
-El comando crea lotes de hasta 50 cartas. No permanece esperando: guarda cada
-lote en PostgreSQL y asigna a sus trabajos un `available_at` separado del lote
-siguiente por un intervalo aleatorio de 5 a 30 minutos. Los trabajos de backfill
+El comando crea lotes de hasta 50 cartas. Todos los trabajos de un lote comparten
+el mismo `available_at`, de modo que el worker puede procesarlos con concurrencia.
+El primer lote queda disponible inmediatamente y cada lote siguiente toma el
+horario del anterior y le suma un intervalo aleatorio de 5 a 30 minutos. Los
+trabajos de backfill
 usan prioridad `-10`, por lo que una busqueda interactiva con prioridad `0` se
 atiende antes. El worker debe ejecutarse como un proceso separado.
 

@@ -30,6 +30,10 @@ class ExtractResult:
     retry_after_seconds: int | None = None
 
 
+def normalize_card_name(card_name: str) -> str:
+    return card_name.strip().strip('"').strip()
+
+
 def parse_retry_after(value: str | None) -> int | None:
     if not value:
         return None
@@ -67,7 +71,8 @@ async def fetch_card_page(
     *,
     rate_limiter: HostRateLimiter | None = None,
 ) -> ExtractResult:
-    encoded_name = quote(card_name, safe="").replace("%20", "+")
+    normalized_name = normalize_card_name(card_name)
+    encoded_name = quote(normalized_name, safe="").replace("%20", "+")
 
     if rate_limiter is not None:
         await rate_limiter.wait()
@@ -75,18 +80,20 @@ async def fetch_card_page(
     try:
         response = await client.get(encoded_name)
     except httpx.TimeoutException:
-        return ExtractResult(card_name, ExtractStatus.TIMEOUT)
+        return ExtractResult(normalized_name, ExtractStatus.TIMEOUT)
     except httpx.RequestError:
-        return ExtractResult(card_name, ExtractStatus.NETWORK_ERROR)
+        return ExtractResult(normalized_name, ExtractStatus.NETWORK_ERROR)
 
     if response.status_code == 404:
         return ExtractResult(
-            card_name, ExtractStatus.NOT_FOUND, status_code=response.status_code
+            normalized_name,
+            ExtractStatus.NOT_FOUND,
+            status_code=response.status_code,
         )
 
     if response.status_code == 429:
         return ExtractResult(
-            card_name,
+            normalized_name,
             ExtractStatus.RATE_LIMITED,
             status_code=response.status_code,
             retry_after_seconds=parse_retry_after(response.headers.get("Retry-After")),
@@ -94,10 +101,12 @@ async def fetch_card_page(
 
     if not response.is_success:
         return ExtractResult(
-            card_name, ExtractStatus.HTTP_ERROR, status_code=response.status_code
+            normalized_name,
+            ExtractStatus.HTTP_ERROR,
+            status_code=response.status_code,
         )
 
-    return ExtractResult(card_name, ExtractStatus.SUCCESS, html=response.text)
+    return ExtractResult(normalized_name, ExtractStatus.SUCCESS, html=response.text)
 
 
 async def scrape_cards(

@@ -22,7 +22,7 @@ from src.core.utils.utils import datetime_now
 from src.settings.scraper_settings import ScraperSettings, scraper_settings
 
 logger = logging.getLogger("free_win.scraper_backfill")
-STATE_VERSION = 1
+STATE_VERSION = 3
 
 
 class BackfillStateError(RuntimeError):
@@ -84,6 +84,27 @@ class BackfillState:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> BackfillState:
+        value = dict(value)
+
+        if value.get("version") == 1:
+            value["version"] = STATE_VERSION
+
+        if value.get("version") == 2:
+            last_job_available_at = value.pop("last_job_available_at", None)
+            max_interval = int(
+                value.get("config", {}).get("max_interval_minutes", 30)
+            )
+
+            if last_job_available_at is None:
+                value["next_batch_available_at"] = value["updated_at"]
+            else:
+                value["next_batch_available_at"] = (
+                    datetime.fromisoformat(last_job_available_at)
+                    + timedelta(minutes=max_interval)
+                ).isoformat()
+
+            value["version"] = STATE_VERSION
+
         try:
             state = cls(**value)
         except (TypeError, ValueError) as exc:
@@ -376,10 +397,10 @@ async def run_missing_listings_backfill(
                         requested_at=now,
                     )
 
+                state.last_card_id = cards[-1].id
                 gap = randomizer.randint(
                     config.min_interval_minutes, config.max_interval_minutes
                 )
-                state.last_card_id = cards[-1].id
                 state.next_batch_available_at = (
                     scheduled_at + timedelta(minutes=gap)
                 ).isoformat()

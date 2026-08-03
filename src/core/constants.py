@@ -1,9 +1,6 @@
 from datetime import timedelta, timezone
 
 BASE_URL = "https://www.coolstuffinc.com/p/YuGiOh/"
-BASE_URL_SEARCH = "https://www.coolstuffinc.com/main_search.php"
-SEARCH_RESULTS_PER_PAGE = 50
-SEARCH_DEFAULT_PAGE = 1
 REQUEST_TIMEOUT_SECONDS = 15
 DELAY_BETWEEN_REQUESTS_SECONDS = 1.5
 USER_AGENT = (

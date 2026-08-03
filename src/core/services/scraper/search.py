@@ -9,13 +9,13 @@ class CardListingSearch(Protocol):
 
 
 class ScraperCardListingSearch:
-    """Compatibility adapter for manual callers; the API never uses it inline."""
-
     async def search(self, query: str) -> list[CardListing]:
         extraction = (await scrape_cards([query]))[0]
+
         if extraction.status is not ExtractStatus.SUCCESS or extraction.html is None:
             return []
-        return transform_card_page(extraction.html, query).listings
+
+        return transform_card_page(extraction.html, extraction.card_name).listings
 
 
 _card_listing_search: CardListingSearch = ScraperCardListingSearch()
