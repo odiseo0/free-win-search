@@ -26,6 +26,7 @@ OWNED_TABLES = frozenset(
         "card_listings",
         "scrape_targets",
         "scrape_jobs",
+        "search_index_events",
         VERSION_TABLE,
     }
 )

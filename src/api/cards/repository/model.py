@@ -26,6 +26,11 @@ from src.core.db import Base, Date
 
 
 class Card(Date, Base, kw_only=True):
+    __table_args__ = (
+        CheckConstraint("jsonb_typeof(sets) = 'array'", name="sets_json_array"),
+        CheckConstraint("jsonb_typeof(prices) = 'array'", name="prices_json_array"),
+        CheckConstraint("jsonb_typeof(images) = 'array'", name="images_json_array"),
+    )
     id: Mapped[int] = mapped_column(
         BigInteger,
         init=False,
@@ -33,14 +38,14 @@ class Card(Date, Base, kw_only=True):
         primary_key=True,
     )
     ygo_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
-    sets: Mapped[dict] = mapped_column(JSONB)
+    sets: Mapped[list[dict[str, object]]] = mapped_column(JSONB)
     card_type: Mapped[str]
     race: Mapped[str]
     name: Mapped[str] = mapped_column(String(255))
     text: Mapped[str] = mapped_column(Text)
     attribute: Mapped[str | None]
-    prices: Mapped[dict] = mapped_column(JSONB)
-    images: Mapped[dict] = mapped_column(JSONB)
+    prices: Mapped[list[dict[str, object]]] = mapped_column(JSONB)
+    images: Mapped[list[dict[str, object]]] = mapped_column(JSONB)
 
 
 class CardListing(Date, Base, kw_only=True):
@@ -53,6 +58,7 @@ class CardListing(Date, Base, kw_only=True):
         ),
         CheckConstraint("price >= 0", name="price_non_negative"),
         CheckConstraint("stock >= 0", name="stock_non_negative"),
+        Index("ix_card_listings_upper_code", text("upper(code)")),
     )
 
     id: Mapped[int] = mapped_column(
@@ -87,6 +93,38 @@ class CardListing(Date, Base, kw_only=True):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     card: Mapped[Card | None] = relationship("Card", lazy="selectin", init=False)
+
+
+class SearchIndexEvent(Date, Base, kw_only=True):
+    __table_args__ = (
+        CheckConstraint("attempts >= 0", name="attempts_non_negative"),
+        Index("ix_search_index_events_claim", "status", "available_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        primary_key=True,
+        default_factory=uuid4,
+        insert_default=uuid4,
+    )
+    card_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None, nullable=True
+    )
+    remote_task_uid: Mapped[int | None] = mapped_column(
+        BigInteger, default=None, nullable=True
+    )
+    last_error: Mapped[str | None] = mapped_column(
+        String(255), default=None, nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None, nullable=True
+    )
 
 
 class ScrapeTarget(Date, Base, kw_only=True):
