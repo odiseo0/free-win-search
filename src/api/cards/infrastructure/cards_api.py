@@ -3,12 +3,23 @@ from typing import Annotated, assert_never
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.cards.application import create, get_multi, get_one, remove, update
+from src.api.cards.application import (
+    create,
+    get_detail,
+    get_multi,
+    remove,
+    search_cards,
+    update,
+)
+from src.api.cards.application.search import CardSearch
+from src.api.cards.application.search_deps import get_card_search
 from src.api.cards.domain import (
     CardCreate,
+    CardDetailResponse,
     CardListResponse,
     CardNotFound,
     CardResponse,
+    CardSearchResponse,
     CardUpdate,
 )
 from src.core import Err, Ok
@@ -37,6 +48,32 @@ _CARD_NOT_FOUND_RESPONSE = {
     **NOT_FOUND_RESPONSE,
     "description": "La carta no existe.",
 }
+
+
+@router.get(
+    "/search",
+    response_model=CardSearchResponse,
+    operation_id="searchCards",
+    summary="Buscar cartas del catálogo",
+    responses={**_AUTH_RESPONSES, 503: {"description": "Búsqueda no disponible."}},
+)
+async def search_card_catalog(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    search_backend: Annotated[CardSearch | None, Depends(get_card_search)],
+    query: Annotated[str, Query(min_length=1, max_length=255, pattern=r".*\S.*")],
+    page: Annotated[int, Query(ge=1)] = 1,
+    shows: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> CardSearchResponse:
+    result = await search_cards(db, search_backend, query, page=page, shows=shows)
+
+    match result:
+        case Ok(response):
+            return response
+        case Err():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="La búsqueda no está disponible",
+            )
 
 
 @router.get(
@@ -74,7 +111,7 @@ async def read_cards(
 @router.get(
     "/{card_id}",
     status_code=status.HTTP_200_OK,
-    response_model=CardResponse,
+    response_model=CardDetailResponse,
     operation_id="getCard",
     summary="Consultar una carta",
     description="Devuelve una carta persistida del catálogo propio.",
@@ -85,10 +122,9 @@ async def read_cards(
 )
 async def read_card(
     db: Annotated[AsyncSession, Depends(get_db)],
-    cache: Annotated[Cache, Depends(get_cache)],
     card_id: CardId,
-) -> CardResponse:
-    result = await get_one(db, cache, card_id)
+) -> CardDetailResponse:
+    result = await get_detail(db, card_id)
 
     match result:
         case Ok(card):

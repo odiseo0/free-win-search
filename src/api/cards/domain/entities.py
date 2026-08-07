@@ -3,12 +3,41 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
+from typing import ClassVar
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from src.core.schema import BaseModel, PaginatedResponse
+
+
+class SourceExtensionModel(BaseModel):
+    model_config: ClassVar[ConfigDict] = {**BaseModel.model_config, "extra": "allow"}
+
+
+class CardSet(SourceExtensionModel):
+    set_name: str
+    set_code: str
+    set_rarity: str
+    set_rarity_code: str | None = None
+    set_price: Decimal
+    set_edition: str | None = None
+    set_url: str | None = None
+
+
+class CardImage(SourceExtensionModel):
+    id: int
+    image_url: str
+    image_url_small: str
+    image_url_cropped: str
+
+
+class CardPrice(SourceExtensionModel):
+    cardmarket_price: Decimal | None = None
+    tcgplayer_price: Decimal | None = None
+    ebay_price: Decimal | None = None
+    amazon_price: Decimal | None = None
+    coolstuffinc_price: Decimal | None = None
 
 
 class Card(BaseModel):
@@ -17,7 +46,7 @@ class Card(BaseModel):
         description="Identificador de la carta en la fuente externa de Yu-Gi-Oh!.",
         examples=[46986414],
     )
-    sets: dict[str, Any] | None = Field(
+    sets: list[CardSet] | None = Field(
         default=None,
         description=(
             "Sets recibidos de la fuente externa. Su estructura aún no está "
@@ -38,7 +67,7 @@ class Card(BaseModel):
         default=None,
         description="Atributo de la carta, cuando la fuente lo proporciona.",
     )
-    prices: dict[str, Any] | None = Field(
+    prices: list[CardPrice] | None = Field(
         default=None,
         description=(
             "Precios de referencia recibidos de la fuente externa; no representan "
@@ -46,7 +75,7 @@ class Card(BaseModel):
         ),
         examples=[0.79, 1.00, 6.99],
     )
-    images: dict[str, Any] | None = Field(
+    images: list[CardImage] | None = Field(
         default=None,
         description=(
             "Metadatos de imágenes de la fuente externa, todavía sin normalizar."
@@ -59,7 +88,7 @@ class CardCreate(Card):
         default=...,
         description="Identificador de la carta en la fuente externa de Yu-Gi-Oh!.",
     )
-    sets: dict[str, Any] = Field(
+    sets: list[CardSet] = Field(
         default=...,
         description=(
             "Sets recibidos de la fuente externa, todavía sin normalizar en campos "
@@ -73,7 +102,7 @@ class CardCreate(Card):
     name: str = Field(default=..., description="Nombre oficial de la carta.")
     text: str = Field(default=..., description="Texto oficial de la carta.")
     attribute: str = Field(default=..., description="Atributo de la carta.")
-    prices: dict[str, Any] = Field(
+    prices: list[CardPrice] = Field(
         default=...,
         description=(
             "Precios externos de referencia; no representan el precio definitivo "
@@ -81,7 +110,7 @@ class CardCreate(Card):
         ),
         examples=[0.79, 1.00, 6.99],
     )
-    images: dict[str, Any] = Field(
+    images: list[CardImage] = Field(
         default=...,
         description="Metadatos externos de imágenes, todavía sin normalizar.",
     )
@@ -146,6 +175,30 @@ class CardListingResponse(BaseModel):
 
 class CardListingListResponse(PaginatedResponse[CardListingResponse]):
     pass
+
+
+class CardDetailResponse(CardResponse):
+    listings: list[CardListingResponse] = Field(default_factory=list)
+
+
+class CardSearchDocument(BaseModel):
+    card_id: int
+    ygo_id: int
+    name: str
+    text: str
+    card_type: str
+    race: str
+    attribute: str | None
+    sets: list[CardSet]
+    images: list[CardImage]
+    source_updated_at: datetime
+    document_version: int = 1
+
+
+class CardSearchResponse(PaginatedResponse[CardSearchDocument]):
+    page: int
+    shows: int
+    degraded: bool = False
 
 
 class ScrapeJobStatus(StrEnum):

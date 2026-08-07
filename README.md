@@ -44,6 +44,23 @@ pdm run uvicorn src.application:app
 pdm run python -m src.core.services.scraper worker
 ```
 
+La busqueda canonica usa PostgreSQL de forma predeterminada. Para consumir un
+servidor MeiliSearch externo configura `SEARCH_BACKEND=meilisearch`,
+`SEARCH_MEILISEARCH_URL`, la API key si aplica y `SEARCH_INDEX_UID`. El API cae
+a PostgreSQL si la busqueda remota falla; PostgreSQL sigue siendo la autoridad.
+
+La sincronizacion del indice se ejecuta como otro proceso del mismo artefacto:
+
+```shell
+pdm run python -m src.core.services.search_index worker
+pdm run python -m src.core.services.search_index once
+pdm run python -m src.core.services.search_index reindex --batch-size 100
+```
+
+`reindex` no elimina documentos desconocidos. La activacion de lecturas en
+MeiliSearch debe hacerse solamente despues de aprobar y aplicar sus settings y
+de completar la reindexacion.
+
 Para reclamar como máximo un trabajo (bootstrap o prueba manual):
 
 ```shell

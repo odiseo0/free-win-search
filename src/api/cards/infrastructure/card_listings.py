@@ -123,8 +123,23 @@ async def read_card_listings(
     cache: Annotated[Cache, Depends(get_cache)],
     page: Annotated[int, Query(ge=1)] = 1,
     shows: Annotated[int, Query(ge=1, le=100)] = 100,
+    card_id: Annotated[int | None, Query(alias="cardId", gt=0)] = None,
+    ygo_id: Annotated[int | None, Query(alias="ygoId", gt=0)] = None,
+    code: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
+    condition: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
+    rarity: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
+    source: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
+    is_active: Annotated[bool, Query(alias="isActive")] = True,
+    order_by: Annotated[
+        str, Query(alias="orderBy", pattern="^(price|code|name|date_added)$")
+    ] = "price",
+    descending: bool = False,
 ) -> CardListingListResponse:
-    result = await get_multi_listings(db, cache, page=page, shows=shows)
+    result = await get_multi_listings(
+        db, cache, page=page, shows=shows, card_id=card_id, ygo_id=ygo_id,
+        code=code, condition=condition, rarity=rarity, source=source,
+        is_active=is_active, order_by=order_by, descending=descending,
+    )
     match result:
         case Ok(response):
             return response

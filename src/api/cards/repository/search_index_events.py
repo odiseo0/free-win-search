@@ -12,7 +12,9 @@ from .model import SearchIndexEvent
 async def enqueue_card(db: AsyncSession, card_id: int) -> SearchIndexEvent:
     event = SearchIndexEvent(card_id=card_id)
     db.add(event)
+
     await db.flush()
+
     return event
 
 
@@ -39,17 +41,18 @@ async def claim_events(
         .all()
     )
     lease = now + timedelta(seconds=lease_seconds)
+
     for event in rows:
         event.status = "running"
         event.attempts += 1
         event.lease_expires_at = lease
+
     await db.commit()
+
     return rows
 
 
-async def save_task_uid(
-    db: AsyncSession, event_ids: list[UUID], task_uid: int
-) -> None:
+async def save_task_uid(db: AsyncSession, event_ids: list[UUID], task_uid: int) -> None:
     await db.execute(
         update(SearchIndexEvent)
         .where(SearchIndexEvent.id.in_(event_ids))
@@ -86,11 +89,14 @@ async def mark_retry(
         "lease_expires_at": None,
         "last_error": error_code[:255],
     }
+
     if clear_task_uid:
         values["remote_task_uid"] = None
+
     await db.execute(
         update(SearchIndexEvent)
         .where(SearchIndexEvent.id.in_(event_ids))
         .values(**values)
     )
+
     await db.commit()

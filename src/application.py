@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.api import router
+from src.api.cards.application.search_deps import close_card_search, get_card_search
 from src.core.services.cache import close_cache, get_cache
 
 API_DESCRIPTION = "Free Win Search es el API de búsqueda de cartas"
@@ -26,11 +27,13 @@ OPENAPI_TAGS = [
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
     cache = get_cache()
+    get_card_search()
 
     try:
         await cache.start()
         yield
     finally:
+        await close_card_search()
         await close_cache()
 
 

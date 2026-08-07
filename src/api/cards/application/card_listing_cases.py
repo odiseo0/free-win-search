@@ -77,19 +77,29 @@ async def get_multi(
     *,
     page: int = 1,
     shows: int = 100,
+    card_id: int | None = None,
+    ygo_id: int | None = None,
+    code: str | None = None,
+    condition: str | None = None,
+    rarity: str | None = None,
+    source: str | None = None,
+    is_active: bool = True,
+    order_by: str = "price",
+    descending: bool = False,
 ) -> Result[CardListingListResponse, Never]:
-    key = f"{CARD_LISTING_CACHE_PREFIX}list:{page}:{shows}"
+    key = (
+        f"{CARD_LISTING_CACHE_PREFIX}list:{page}:{shows}:{card_id}:{ygo_id}:"
+        f"{code}:{condition}:{rarity}:{source}:{is_active}:{order_by}:{descending}"
+    )
     cached = await get_cached_model(cache, key, CardListingListResponse)
 
     if cached is not None:
         return Ok(cached)
 
-    listings, total = await dao.get_multi(
-        db,
-        where={"is_active": True},
-        page=(page - 1) * shows,
-        shows=shows,
-        ordering=[("price", False)],
+    listings, total = await dao.filtered(
+        db, page=page, shows=shows, card_id=card_id, ygo_id=ygo_id,
+        code=code, condition=condition, rarity=rarity, source=source,
+        is_active=is_active, order_by=order_by, descending=descending,
     )
     response = CardListingListResponse(
         items=[CardListingResponse.model_validate(item) for item in listings],
