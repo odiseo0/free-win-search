@@ -17,16 +17,20 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
     text,
+    true,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.core.db import Base, Date
+from src.core.utils.utils import datetime_now
 
 
 class Card(Date, Base, kw_only=True):
     __table_args__ = (
+        UniqueConstraint("ygo_id", name="uq_cards_ygo_id"),
+        Index("ix_cards_ygo_id", "ygo_id"),
         CheckConstraint("jsonb_typeof(sets) = 'array'", name="sets_json_array"),
         CheckConstraint("jsonb_typeof(prices) = 'array'", name="prices_json_array"),
         CheckConstraint("jsonb_typeof(images) = 'array'", name="images_json_array"),
@@ -37,7 +41,7 @@ class Card(Date, Base, kw_only=True):
         autoincrement=True,
         primary_key=True,
     )
-    ygo_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    ygo_id: Mapped[int] = mapped_column(BigInteger)
     sets: Mapped[list[dict[str, object]]] = mapped_column(JSONB)
     card_type: Mapped[str]
     race: Mapped[str]
@@ -78,19 +82,25 @@ class CardListing(Date, Base, kw_only=True):
         default=None,
         nullable=True,
     )
-    source: Mapped[str] = mapped_column(String(64), default="coolstuffinc")
+    source: Mapped[str] = mapped_column(
+        String(64), default="coolstuffinc", server_default="coolstuffinc"
+    )
     ygo_set: Mapped[str]
     name: Mapped[str] = mapped_column(String(255))
     code: Mapped[str]
     price: Mapped[Decimal]
     rarity: Mapped[str]
     condition: Mapped[str]
-    currency: Mapped[str] = mapped_column(String(3), default="USD")
-    stock: Mapped[int] = mapped_column(default=0)
+    currency: Mapped[str] = mapped_column(
+        String(3), default="USD", server_default="USD"
+    )
+    stock: Mapped[int] = mapped_column(default=0, server_default="0")
     last_seen_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), default=None, nullable=True
     )
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=true()
+    )
 
     card: Mapped[Card | None] = relationship("Card", lazy="selectin", init=False)
 
@@ -108,10 +118,16 @@ class SearchIndexEvent(Date, Base, kw_only=True):
         insert_default=uuid4,
     )
     card_id: Mapped[int] = mapped_column(BigInteger, index=True)
-    status: Mapped[str] = mapped_column(String(20), default="pending")
-    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(
+        String(20), default="pending", server_default="pending"
+    )
+    attempts: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
     available_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        DateTime(timezone=True),
+        default_factory=datetime_now,
+        server_default=func.now(),
     )
     lease_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), default=None, nullable=True
@@ -129,6 +145,10 @@ class SearchIndexEvent(Date, Base, kw_only=True):
 
 class ScrapeTarget(Date, Base, kw_only=True):
     __table_args__ = (
+        UniqueConstraint("card_id", name="uq_scrape_targets_card_id"),
+        UniqueConstraint("ygo_id", name="uq_scrape_targets_ygo_id"),
+        Index("ix_scrape_targets_card_id", "card_id"),
+        Index("ix_scrape_targets_ygo_id", "ygo_id"),
         CheckConstraint(
             "last_in_stock_count >= 0",
             name="last_in_stock_count_non_negative",
@@ -141,10 +161,8 @@ class ScrapeTarget(Date, Base, kw_only=True):
     card_id: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("cards.id", ondelete="CASCADE"),
-        unique=True,
-        index=True,
     )
-    ygo_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    ygo_id: Mapped[int] = mapped_column(BigInteger)
     canonical_name: Mapped[str] = mapped_column(String(255))
     last_requested_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -155,9 +173,15 @@ class ScrapeTarget(Date, Base, kw_only=True):
     next_refresh_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), default=None, nullable=True
     )
-    last_result_count: Mapped[int] = mapped_column(Integer, default=0)
-    last_in_stock_count: Mapped[int] = mapped_column(Integer, default=0)
-    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_result_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
+    last_in_stock_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
+    is_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=true()
+    )
     disabled_reason: Mapped[str | None] = mapped_column(
         String(64), default=None, nullable=True
     )
@@ -187,9 +211,15 @@ class ScrapeJob(Date, Base, kw_only=True):
     target_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("scrape_targets.id", ondelete="CASCADE"), index=True
     )
-    status: Mapped[str] = mapped_column(String(20), default="pending")
-    priority: Mapped[int] = mapped_column(Integer, default=0)
-    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(
+        String(20), default="pending", server_default="pending"
+    )
+    priority: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
+    attempts: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
     available_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
