@@ -35,12 +35,16 @@ class CardDAO(DAO[Card, CardCreate, CardUpdate]):
         )
         count = await self.count(db, statement)
         rows = (
-            await db.execute(
-                statement.order_by(self.model.name.asc(), self.model.id.asc())
-                .offset((page - 1) * shows)
-                .limit(shows)
+            (
+                await db.execute(
+                    statement.order_by(self.model.name.asc(), self.model.id.asc())
+                    .offset((page - 1) * shows)
+                    .limit(shows)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         return list(rows), count
 
     async def get_many_by_ids(
@@ -80,20 +84,27 @@ class CardListingDAO(DAO[CardListing, CardListingResponse, CardListingResponse])
             "rarity": rarity,
             "source": source,
         }
+
         for field, value in values.items():
             if value is not None:
                 statement = statement.where(getattr(self.model, field) == value)
+
         if code is not None:
             statement = statement.where(func.upper(self.model.code) == code.upper())
+
         ordering = getattr(self.model, order_by)
         statement = statement.order_by(
             ordering.desc() if descending else ordering.asc(), self.model.id.asc()
         )
         count = await self.count(db, statement)
         rows = (
-            await db.execute(statement.offset((page - 1) * shows).limit(shows))
-        ).scalars().all()
+            (await db.execute(statement.offset((page - 1) * shows).limit(shows)))
+            .scalars()
+            .all()
+        )
+
         return list(rows), count
+
     async def search_by_name(
         self,
         db: AsyncSession,
