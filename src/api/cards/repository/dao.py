@@ -45,6 +45,7 @@ class CardDAO(DAO[Card, CardCreate, CardUpdate]):
             .scalars()
             .all()
         )
+
         return list(rows), count
 
     async def get_many_by_ids(
