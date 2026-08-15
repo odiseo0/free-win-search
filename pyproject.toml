@@ -37,3 +37,6 @@ reportUnknownVariableType = false
 reportUnknownArgumentType = false
 reportReturnType = false
 reportArgumentType = false
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
