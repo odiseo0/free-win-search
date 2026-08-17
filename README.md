@@ -37,7 +37,82 @@ No uses `stamp` sobre la tabla compartida. La autogeneración de Search está
 restringida a `cards`, `card_listings`, `scrape_targets` y `scrape_jobs`, de modo
 que no propondrá eliminar tablas pertenecientes a Orders.
 
-Ejecuta el API y el worker como procesos separados del mismo artefacto:
+## Docker
+
+La imagen contiene solo Free Win Search. PostgreSQL, Valkey y Meilisearch se
+ejecutan fuera de este contenedor. Construye la imagen desde la raíz del
+repositorio:
+
+```shell
+docker build --tag free-win-search:local .
+```
+
+Free Win y Free Win Search deben usar la misma red de Docker. Crea la red una
+sola vez si el despliegue principal aún no la creó:
+
+```shell
+docker network create free-win
+```
+
+Configura `.env.docker` con nombres que Docker pueda resolver. No uses
+`localhost` para servicios que están en otros contenedores. Por ejemplo:
+
+```dotenv
+DB_HOST=postgres
+DB_NAME=free_win
+DB_PORT=5432
+DB_USERNAME=free_win
+DB_PASSWORD=change-me
+CACHE_BACKEND=valkey
+CACHE_URL=valkey://valkey:6379/0
+SEARCH_BACKEND=meilisearch
+SEARCH_MEILISEARCH_URL=http://meilisearch:7700
+```
+
+Aplica las migraciones de forma manual antes de iniciar una versión que las
+necesite. La imagen nunca ejecuta Alembic durante su arranque:
+
+```shell
+docker run --rm --network free-win --env-file .env.docker \
+  free-win-search:local alembic upgrade head
+```
+
+Inicia el servicio con una política de reinicio:
+
+```shell
+docker run --detach --name free-win-search --network free-win \
+  --env-file .env.docker --publish 8000:8000 --restart unless-stopped \
+  free-win-search:local
+```
+
+El comando predeterminado inicia un proceso de Uvicorn y un worker del scraper.
+También inicia el worker del índice cuando `SEARCH_BACKEND=meilisearch`. Si uno
+de estos procesos termina, el contenedor termina para que Docker pueda
+reiniciarlo.
+
+Mantén una sola réplica de este contenedor. Cada réplica crea otro scraper y
+aumenta la frecuencia total de llamadas al sitio externo. PostgreSQL evita que
+dos workers reclamen el mismo trabajo, pero no comparte el límite de frecuencia.
+
+La misma imagen permite ejecutar tareas manuales sin cambiar su comando
+predeterminado:
+
+```shell
+docker run --rm --network free-win --env-file .env.docker \
+  free-win-search:local python -m src.core.services.scraper backfill-missing --dry-run
+docker run --rm --network free-win --env-file .env.docker \
+  free-win-search:local python -m src.core.services.scraper backfill-missing
+docker run --rm --network free-win --env-file .env.docker \
+  free-win-search:local python -m src.core.services.search_index reindex --batch-size 100
+docker run --rm --network free-win --env-file .env.docker \
+  free-win-search:local python -m src.core.services.scraper once
+```
+
+`PORT` cambia el puerto interno y su valor predeterminado es `8000`. Si lo
+cambias, ajusta también la publicación del puerto.
+
+Fuera de Docker, ejecuta el API y el worker como procesos separados del mismo
+artefacto:
 
 ```shell
 pdm run uvicorn src.application:app
@@ -100,7 +175,8 @@ El primer lote queda disponible inmediatamente y cada lote siguiente toma el
 horario del anterior y le suma un intervalo aleatorio de 5 a 30 minutos. Los
 trabajos de backfill
 usan prioridad `-10`, por lo que una busqueda interactiva con prioridad `0` se
-atiende antes. El worker debe ejecutarse como un proceso separado.
+atiende antes. Fuera de Docker, el worker debe ejecutarse como un proceso
+separado. El comando predeterminado de la imagen ya lo inicia.
 
 El progreso durable se escribe atomicamente en
 `var/scraper/missing-listings-backfill.json`. Si el proceso falla, la siguiente
