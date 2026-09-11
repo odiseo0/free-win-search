@@ -27,6 +27,7 @@ class CardListingData(Protocol):
     rarity: str
     condition: str
     stock: int
+    source_product_key: str
 
 
 def _card_listing_row(
@@ -37,8 +38,12 @@ def _card_listing_row(
     source: str,
     observed_at: datetime,
 ) -> dict[str, object]:
-    if not listing.code.strip() or not listing.condition.strip():
-        raise ValueError("Listing code and condition are required")
+    if (
+        not listing.source_product_key.strip()
+        or not listing.code.strip()
+        or not listing.condition.strip()
+    ):
+        raise ValueError("Listing product key, code, and condition are required")
 
     if listing.price < 0 or listing.stock < 0:
         raise ValueError("Listing price and stock cannot be negative")
@@ -47,6 +52,7 @@ def _card_listing_row(
         "card_id": card_id,
         "ygo_id": ygo_id,
         "source": source.strip().casefold(),
+        "source_product_key": listing.source_product_key.strip().casefold(),
         "name": listing.name,
         "ygo_set": listing.set,
         "code": listing.code.strip().upper(),
@@ -69,7 +75,7 @@ def build_card_listing_rows(
     source: str,
     observed_at: datetime,
 ) -> list[dict[str, object]]:
-    unique_rows: dict[tuple[str, str, str], dict[str, object]] = {}
+    unique_rows: dict[tuple[str, str, str, str], dict[str, object]] = {}
 
     for listing in card_listings:
         row = _card_listing_row(
@@ -81,6 +87,7 @@ def build_card_listing_rows(
         )
         identity = (
             str(row["source"]).casefold(),
+            str(row["source_product_key"]).casefold(),
             str(row["code"]).upper(),
             str(row["condition"]).casefold(),
         )
@@ -113,7 +120,7 @@ async def load_scraped_data_to_database(
     if rows:
         stmt = postgresql_insert(CardListing).values(rows)
         stmt = stmt.on_conflict_do_update(
-            constraint="uq_card_listings_source_code_condition",
+            constraint="uq_card_listings_source_product_code_condition",
             set_={
                 "card_id": stmt.excluded.card_id,
                 "ygo_id": stmt.excluded.ygo_id,

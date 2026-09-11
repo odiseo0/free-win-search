@@ -33,6 +33,7 @@ class CardListing:
     rarity: str
     condition: str
     stock: int = 0
+    source_product_key: str = ""
 
 
 @dataclass
@@ -95,6 +96,7 @@ def _build_listing(
     set_name: str,
     code: str,
     details: _ListingDetails,
+    source_product_key: str = "",
 ) -> CardListing:
     return CardListing(
         name=name,
@@ -104,6 +106,7 @@ def _build_listing(
         rarity=details.rarity,
         condition=details.condition,
         stock=details.stock,
+        source_product_key=source_product_key,
     )
 
 
@@ -121,7 +124,9 @@ def _parse_card_listing_task(card_and_html: tuple[str, str]) -> list[CardListing
     return parse_card_listings(html, card_name)
 
 
-def parse_listings_from_text(soup: BeautifulSoup, card_name: str) -> list[CardListing]:
+def parse_listings_from_text(
+    soup: BeautifulSoup, card_name: str, source_product_key: str = ""
+) -> list[CardListing]:
     listings: list[CardListing] = []
     full_text = soup.get_text()
 
@@ -144,13 +149,16 @@ def parse_listings_from_text(soup: BeautifulSoup, card_name: str) -> list[CardLi
                     set_name="",
                     code=code,
                     details=details,
+                    source_product_key=source_product_key,
                 )
             )
 
     return listings
 
 
-def extract_listing_from_row(row, card_name: str) -> CardListing | None:
+def extract_listing_from_row(
+    row, card_name: str, source_product_key: str = ""
+) -> CardListing | None:
     row_text = row.get_text()
     code_match = _CARD_CODE_PATTERN.search(row_text)
 
@@ -177,10 +185,13 @@ def extract_listing_from_row(row, card_name: str) -> CardListing | None:
         set_name=set_name,
         code=code,
         details=details,
+        source_product_key=source_product_key,
     )
 
 
-def parse_card_listings(html: str, card_name: str) -> list[CardListing]:
+def parse_card_listings(
+    html: str, card_name: str, source_product_key: str = ""
+) -> list[CardListing]:
     soup = BeautifulSoup(html, "html.parser")
     listings: list[CardListing] = []
 
@@ -195,7 +206,7 @@ def parse_card_listings(html: str, card_name: str) -> list[CardListing]:
 
     for row in product_rows:
         try:
-            listing = extract_listing_from_row(row, page_card_name)
+            listing = extract_listing_from_row(row, page_card_name, source_product_key)
 
             if listing:
                 listings.append(listing)
@@ -203,7 +214,7 @@ def parse_card_listings(html: str, card_name: str) -> list[CardListing]:
             continue
 
     if not listings:
-        listings = parse_listings_from_text(soup, page_card_name)
+        listings = parse_listings_from_text(soup, page_card_name, source_product_key)
 
     return deduplicate_listings(listings)
 
@@ -226,7 +237,9 @@ class TransformResult:
     report: TransformReport
 
 
-def transform_card_page(html: str, card_name: str) -> TransformResult:
+def transform_card_page(
+    html: str, card_name: str, source_product_key: str = ""
+) -> TransformResult:
     soup = BeautifulSoup(html, "html.parser")
     rows = soup.select("div.products-container div.row, div.row.product-row")
     confirmed_empty = bool(
@@ -236,7 +249,7 @@ def transform_card_page(html: str, card_name: str) -> TransformResult:
             r"(no (?:items|products)|0 results)", soup.get_text(), re.IGNORECASE
         )
     )
-    listings = parse_card_listings(html, card_name)
+    listings = parse_card_listings(html, card_name, source_product_key)
 
     if rows and not listings:
         raise ParserStructureError("Listing rows were found but none passed validation")
@@ -292,3 +305,13 @@ def extract_page_card_name(soup: BeautifulSoup, default_name: str) -> str:
         return default_name
 
     return page_name
+
+
+def extract_product_page_name(html: str) -> str | None:
+    soup = BeautifulSoup(html, "html.parser")
+    header = soup.select_one("h1.card-name, h1 [itemprop='name'], h1[itemprop='name']")
+
+    if header is None:
+        return None
+
+    return header.get_text(" ", strip=True) or None

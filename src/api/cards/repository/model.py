@@ -56,9 +56,10 @@ class CardListing(Date, Base, kw_only=True):
     __table_args__ = (
         UniqueConstraint(
             "source",
+            "source_product_key",
             "code",
             "condition",
-            name="uq_card_listings_source_code_condition",
+            name="uq_card_listings_source_product_code_condition",
         ),
         CheckConstraint("price >= 0", name="price_non_negative"),
         CheckConstraint("stock >= 0", name="stock_non_negative"),
@@ -85,6 +86,7 @@ class CardListing(Date, Base, kw_only=True):
     source: Mapped[str] = mapped_column(
         String(64), default="coolstuffinc", server_default="coolstuffinc"
     )
+    source_product_key: Mapped[str] = mapped_column(String(512))
     ygo_set: Mapped[str]
     name: Mapped[str] = mapped_column(String(255))
     code: Mapped[str]

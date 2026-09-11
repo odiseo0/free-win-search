@@ -12,16 +12,18 @@ class CardListing(Protocol):
     name: str
     condition: str
     price: Decimal
+    source_product_key: str
 
 
 def deduplicate_listings(listings: list["CardListing"]) -> list["CardListing"]:
-    unique_by_identity: dict[tuple[str, str], CardListing] = {}
+    unique_by_identity: dict[tuple[str, str, str], CardListing] = {}
 
     for listing in listings:
-        # Persistence identity is (source, code, condition). Transformation
+        # Persistence identity is (source, product, code, condition). Transformation
         # handles one source at a time, so source is constant here. A repeated
         # row later in the page replaces an earlier generic row.
         key = (
+            listing.source_product_key.strip().casefold(),
             listing.code.strip().upper(),
             listing.condition.strip().casefold(),
         )

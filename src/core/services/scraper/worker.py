@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from time import monotonic
 from typing import Self
 
-from httpx import AsyncClient
+from httpx import URL, AsyncClient
 
 from src.api.cards.repository.model import ScrapeJob
 from src.api.cards.repository.scrape_jobs import (
@@ -18,17 +18,44 @@ from src.api.cards.repository.scrape_jobs import (
     mark_job_failed,
     mark_job_succeeded,
 )
-from src.core.constants import BASE_URL, USER_AGENT
 from src.core.db.deps import async_session_factory
 from src.core.services.cache import Cache, get_cache
 from src.settings.scraper_settings import ScraperSettings, scraper_settings
 
 from .loader import load_scraped_data_to_database
 from .policy import next_refresh_at
-from .scraper import ExtractStatus, fetch_card_page
-from .transformers import ParserStructureError, TransformResult, transform_card_page
+from .scraper import (
+    ExtractStatus,
+    PageKind,
+    classify_coolstuff_url,
+    create_http_client,
+    fetch_card_page,
+    fetch_url,
+)
+from .search_results import (
+    SearchPaginationError,
+    SearchProduct,
+    SearchStructureError,
+    normalize_search_text,
+    parse_search_page,
+    source_product_key,
+)
+from .transformers import (
+    ParserStructureError,
+    TransformReport,
+    TransformResult,
+    extract_product_page_name,
+    transform_card_page,
+)
 
 logger = logging.getLogger("free_win.scraper_worker")
+
+
+class ScrapeFlowError(RuntimeError):
+    def __init__(self, code: str, retry_after_seconds: int | None = None) -> None:
+        super().__init__(code)
+        self.code = code
+        self.retry_after_seconds = retry_after_seconds
 
 
 def _log(event: str, **context: object) -> None:
@@ -50,11 +77,9 @@ class ScraperWorker:
         self._rate_lock = asyncio.Lock()
 
     async def __aenter__(self) -> Self:
-        self._client = AsyncClient(
-            base_url=BASE_URL,
-            headers={"User-Agent": USER_AGENT},
-            timeout=self.settings.http_timeout_seconds,
-            follow_redirects=True,
+        self._client = create_http_client(
+            timeout_seconds=self.settings.http_timeout_seconds,
+            cookies=self.settings.cookies,
         )
         self._executor = ProcessPoolExecutor()
         await self.cache.start()
@@ -93,30 +118,9 @@ class ScraperWorker:
         retry_override: int | None = None
 
         try:
-            await self._wait_for_host()
-            assert self._client is not None
-            extraction = await fetch_card_page(self._client, job.target.canonical_name)
-
-            if extraction.status is not ExtractStatus.SUCCESS:
-                error_code = extraction.status.value
-                retry_override = extraction.retry_after_seconds
-
-                raise RuntimeError(error_code)
-
-            if extraction.html is None:
-                error_code = "empty_response"
-
-                raise RuntimeError(error_code)
-
-            loop = asyncio.get_running_loop()
-
-            assert self._executor is not None
-
-            transformed: TransformResult = await loop.run_in_executor(
-                self._executor,
-                transform_card_page,
-                extraction.html,
-                extraction.card_name,
+            transformed = await asyncio.wait_for(
+                self._extract_and_transform(job.target.canonical_name),
+                timeout=self.settings.job_timeout_seconds,
             )
             now = datetime.now(UTC)
 
@@ -137,9 +141,7 @@ class ScraperWorker:
                     job.id,
                     result_count=len(transformed.listings),
                     in_stock_count=in_stock_count,
-                    next_refresh_at=next_refresh_at(
-                        now, in_stock_count=in_stock_count
-                    ),
+                    next_refresh_at=next_refresh_at(now, in_stock_count=in_stock_count),
                     now=now,
                 )
                 await db.commit()
@@ -163,10 +165,17 @@ class ScraperWorker:
             )
 
             return True
+        except TimeoutError:
+            error_code = "job_timeout"
+        except SearchPaginationError:
+            error_code = "search_pagination"
+        except SearchStructureError:
+            error_code = "search_structure"
         except ParserStructureError:
             error_code = "parser_structure"
-        except RuntimeError:
-            pass
+        except ScrapeFlowError as exc:
+            error_code = exc.code
+            retry_override = exc.retry_after_seconds
         except Exception:
             error_code = "internal_error"
             logger.exception("unexpected scraper job failure")
@@ -182,6 +191,144 @@ class ScraperWorker:
         )
 
         return True
+
+    async def _request_url(self, url: str):
+        await self._wait_for_host()
+        assert self._client is not None
+        result = await fetch_url(self._client, url)
+
+        if result.status is not ExtractStatus.SUCCESS:
+            raise ScrapeFlowError(result.status.value, result.retry_after_seconds)
+
+        if result.html is None or result.final_url is None:
+            raise ScrapeFlowError("empty_response")
+
+        return result
+
+    async def _extract_and_transform(self, canonical_name: str) -> TransformResult:
+        await self._wait_for_host()
+        assert self._client is not None
+        initial = await fetch_card_page(self._client, canonical_name)
+
+        if initial.status is not ExtractStatus.SUCCESS:
+            raise ScrapeFlowError(initial.status.value, initial.retry_after_seconds)
+
+        if initial.html is None or initial.final_url is None:
+            raise ScrapeFlowError("empty_response")
+
+        initial_url = URL(initial.final_url)
+        kind = classify_coolstuff_url(initial_url, canonical_name)
+
+        if kind is PageKind.PRODUCT:
+            return await self._transform_product(
+                initial.html,
+                canonical_name,
+                source_product_key(canonical_name),
+            )
+
+        if kind is not PageKind.SEARCH_RESULTS:
+            raise ScrapeFlowError("unexpected_page")
+
+        products: dict[str, SearchProduct] = {}
+        seen_pages: set[str] = set()
+        current_html = initial.html
+        current_url = initial.final_url
+        page_number = 1
+        confirmed_empty = False
+
+        while True:
+            if current_url in seen_pages:
+                raise ScrapeFlowError("search_pagination")
+
+            seen_pages.add(current_url)
+            page = parse_search_page(
+                current_html,
+                canonical_name=canonical_name,
+                current_url=current_url,
+                current_page=page_number,
+            )
+            confirmed_empty = confirmed_empty or page.confirmed_empty
+
+            for product in page.products:
+                products[product.source_product_key] = product
+
+            if page.next_url is None:
+                break
+
+            if page_number >= self.settings.max_search_pages:
+                raise ScrapeFlowError("search_page_limit")
+
+            next_result = await self._request_url(page.next_url)
+
+            if URL(next_result.final_url or "") != URL(page.next_url):
+                raise ScrapeFlowError("search_pagination")
+
+            current_html = next_result.html or ""
+            current_url = next_result.final_url or ""
+            page_number += 1
+
+        if not products:
+            if confirmed_empty:
+                return TransformResult(
+                    [], TransformReport(0, 0, 0, confirmed_empty=True)
+                )
+
+            raise ScrapeFlowError("search_structure")
+
+        transformed_pages: list[TransformResult] = []
+
+        for product in products.values():
+            result = await self._request_url(product.url)
+
+            if URL(result.final_url or "") != URL(product.url):
+                raise ScrapeFlowError("product_redirect")
+
+            page_title = extract_product_page_name(result.html or "")
+
+            if page_title is None or normalize_search_text(
+                canonical_name
+            ) not in normalize_search_text(page_title):
+                raise ScrapeFlowError("product_redirect")
+
+            transformed_pages.append(
+                await self._transform_product(
+                    result.html or "",
+                    product.title,
+                    product.source_product_key,
+                )
+            )
+
+        listings = [
+            listing
+            for transformed in transformed_pages
+            for listing in transformed.listings
+        ]
+        rows_seen = sum(item.report.rows_seen for item in transformed_pages)
+
+        return TransformResult(
+            listings=listings,
+            report=TransformReport(
+                rows_seen=rows_seen,
+                rows_valid=len(listings),
+                rows_rejected=sum(
+                    item.report.rows_rejected for item in transformed_pages
+                ),
+            ),
+        )
+
+    async def _transform_product(
+        self, html: str, title: str, product_key: str
+    ) -> TransformResult:
+        loop = asyncio.get_running_loop()
+        assert self._executor is not None
+
+        return await loop.run_in_executor(
+            self._executor,
+            transform_card_page,
+            html,
+            title,
+            product_key,
+        )
 
     async def _record_failure(
         self,
@@ -209,7 +356,12 @@ class ScraperWorker:
             )
 
     async def run_forever(self) -> None:
-        _log("worker_started", poll_seconds=self.settings.poll_seconds)
+        _log(
+            "worker_started",
+            poll_seconds=self.settings.poll_seconds,
+            cookie_count=len(self.settings.cookies),
+            cookie_names=[cookie.name for cookie in self.settings.cookies],
+        )
 
         while True:
             processed = await asyncio.gather(

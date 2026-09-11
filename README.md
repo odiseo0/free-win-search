@@ -144,7 +144,12 @@ pdm run python -m src.core.services.scraper once
 
 En producción configura `CACHE_BACKEND=valkey`; la caché en memoria solo está
 destinada a desarrollo local y pruebas. Los valores del worker se ajustan con
-variables `SCRAPER_*`, incluidos polling, lease, intentos, concurrencia y timeout.
+  variables `SCRAPER_*`, incluidos polling, lease, intentos, concurrencia y timeout.
+  `SCRAPER_COOKIES` acepta una lista JSON de cookies con `name`, `value`, `domain`,
+  `path` y `expires_at`. Guarda los valores reales solo en el entorno privado o
+  en el gestor de secretos. El worker limita la búsqueda a
+  `SCRAPER_MAX_SEARCH_PAGES` páginas y cada trabajo completo a
+  `SCRAPER_JOB_TIMEOUT_SECONDS` segundos.
 
 ## Flujo de búsqueda
 
