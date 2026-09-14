@@ -13,6 +13,7 @@ from .backfill import (
     BackfillConfig,
     BackfillStateError,
     config_from_settings,
+    run_full_catalog_refresh,
     run_missing_listings_backfill,
 )
 from .worker import run_once, run_worker
@@ -40,6 +41,53 @@ async def _reset_target(*, card_id: int | None, ygo_id: int | None) -> int:
     return 0
 
 
+def _add_schedule_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    default_state_path: Path,
+) -> None:
+    parser.add_argument("--state-file", type=Path, default=default_state_path)
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument(
+        "--min-interval-minutes",
+        type=int,
+        help="Minimum delay between batches",
+    )
+    parser.add_argument(
+        "--max-interval-minutes",
+        type=int,
+        help="Maximum delay between batches",
+    )
+    parser.add_argument("--priority", type=int)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--restart",
+        action="store_true",
+        help="Archive an incomplete checkpoint and start from card 0",
+    )
+
+
+def _schedule_config(args: argparse.Namespace) -> BackfillConfig:
+    defaults = config_from_settings()
+
+    return BackfillConfig(
+        batch_size=(
+            args.batch_size if args.batch_size is not None else defaults.batch_size
+        ),
+        min_interval_minutes=(
+            args.min_interval_minutes
+            if args.min_interval_minutes is not None
+            else defaults.min_interval_minutes
+        ),
+        max_interval_minutes=(
+            args.max_interval_minutes
+            if args.max_interval_minutes is not None
+            else defaults.max_interval_minutes
+        ),
+        priority=args.priority if args.priority is not None else defaults.priority,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="scraper")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -50,28 +98,23 @@ def main() -> None:
         "backfill-missing",
         help="Schedule cards that do not have any card listing",
     )
-    backfill.add_argument(
-        "--state-file",
-        type=Path,
-        default=scraper_settings.backfill_state_path,
+    _add_schedule_arguments(
+        backfill,
+        default_state_path=scraper_settings.backfill_state_path,
     )
-    backfill.add_argument("--batch-size", type=int)
-    backfill.add_argument(
-        "--min-interval-minutes",
-        type=int,
-        help="Minimum delay between batches",
+
+    refresh_all = subparsers.add_parser(
+        "refresh-all",
+        help="Schedule every card in the catalog for scraping",
     )
-    backfill.add_argument(
-        "--max-interval-minutes",
-        type=int,
-        help="Maximum delay between batches",
+    _add_schedule_arguments(
+        refresh_all,
+        default_state_path=scraper_settings.refresh_all_state_path,
     )
-    backfill.add_argument("--priority", type=int)
-    backfill.add_argument("--dry-run", action="store_true")
-    backfill.add_argument(
-        "--restart",
+    refresh_all.add_argument(
+        "--include-disabled",
         action="store_true",
-        help="Archive an incomplete checkpoint and start from card 0",
+        help="Re-enable and schedule targets disabled after a 404",
     )
 
     reset = subparsers.add_parser(
@@ -92,33 +135,26 @@ def main() -> None:
             asyncio.run(_reset_target(card_id=args.card_id, ygo_id=args.ygo_id))
         )
     else:
-        defaults = config_from_settings()
-        config = BackfillConfig(
-            batch_size=(
-                args.batch_size if args.batch_size is not None else defaults.batch_size
-            ),
-            min_interval_minutes=(
-                args.min_interval_minutes
-                if args.min_interval_minutes is not None
-                else defaults.min_interval_minutes
-            ),
-            max_interval_minutes=(
-                args.max_interval_minutes
-                if args.max_interval_minutes is not None
-                else defaults.max_interval_minutes
-            ),
-            priority=args.priority if args.priority is not None else defaults.priority,
-        )
-
         try:
-            result = asyncio.run(
-                run_missing_listings_backfill(
-                    state_path=args.state_file,
-                    config=config,
-                    restart=args.restart,
-                    dry_run=args.dry_run,
+            if args.command == "backfill-missing":
+                result = asyncio.run(
+                    run_missing_listings_backfill(
+                        state_path=args.state_file,
+                        config=_schedule_config(args),
+                        restart=args.restart,
+                        dry_run=args.dry_run,
+                    )
                 )
-            )
+            else:
+                result = asyncio.run(
+                    run_full_catalog_refresh(
+                        state_path=args.state_file,
+                        config=_schedule_config(args),
+                        include_disabled=args.include_disabled,
+                        restart=args.restart,
+                        dry_run=args.dry_run,
+                    )
+                )
         except (BackfillStateError, ValueError) as exc:
             parser.error(str(exc))
 

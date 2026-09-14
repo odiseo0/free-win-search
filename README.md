@@ -212,3 +212,43 @@ Las respuestas validas con al menos una publicacion en stock se refrescan una
 hora despues. Si todas tienen stock cero, o la pagina confirma que no hay
 publicaciones, el siguiente refresco queda disponible seis horas despues. Las
 publicaciones con stock cero se conservan en `card_listings`.
+
+## Reinicio completo del scraping
+
+Para contar las cartas que se programarían sin cambiar PostgreSQL ni crear un
+checkpoint:
+
+```shell
+pdm run python -m src.core.services.scraper refresh-all --dry-run
+```
+
+Para programar de nuevo todo el catálogo, incluidas las cartas frescas, vencidas,
+sin publicaciones o con trabajos fallidos:
+
+```shell
+pdm run python -m src.core.services.scraper refresh-all
+```
+
+El comando conserva publicaciones y trabajos anteriores. También conserva los
+trabajos activos y no crea otro para el mismo target. Los targets deshabilitados
+por un 404 se omiten salvo que se habiliten de forma explícita:
+
+```shell
+pdm run python -m src.core.services.scraper refresh-all --include-disabled
+```
+
+Si una carta vuelve a responder 404, el worker vuelve a deshabilitar su target.
+El progreso se guarda en `var/scraper/catalog-refresh.json`, separado del
+checkpoint de `backfill-missing`. Una ejecución interrumpida continúa con el
+mismo comando y las mismas opciones. Para archivar el checkpoint incompleto y
+empezar desde el primer `card_id`:
+
+```shell
+pdm run python -m src.core.services.scraper refresh-all --restart
+```
+
+`refresh-all` admite los mismos argumentos de batch, intervalo, prioridad y
+archivo de estado que `backfill-missing`. Todos los trabajos de un batch comparten
+`available_at`; los batches quedan separados por un intervalo aleatorio. La ruta
+predeterminada del checkpoint se configura con
+`SCRAPER_REFRESH_ALL_STATE_PATH`.

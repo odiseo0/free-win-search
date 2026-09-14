@@ -24,11 +24,14 @@ from src.core.services.scraper.backfill import (
     BackfillState,
     BackfillStateError,
     EnqueueBatchResult,
+    ScheduleMode,
     _load_or_create_state,
     _read_state,
     _write_state,
+    build_cards_statement,
     build_missing_cards_statement,
     enqueue_card_batch,
+    run_full_catalog_refresh,
     run_missing_listings_backfill,
 )
 
@@ -160,6 +163,30 @@ def test_checkpoint_config_mismatch_requires_restart(tmp_path: Path) -> None:
         )
 
 
+def test_checkpoint_mode_and_disabled_option_must_match(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    now = datetime(2026, 9, 11, tzinfo=UTC)
+    _write_state(
+        path,
+        BackfillState.new(
+            BackfillConfig(),
+            now,
+            mode=ScheduleMode.ALL,
+            include_disabled=False,
+        ),
+    )
+
+    with pytest.raises(BackfillStateError, match="--restart"):
+        _load_or_create_state(
+            path,
+            BackfillConfig(),
+            now,
+            restart=False,
+            mode=ScheduleMode.ALL,
+            include_disabled=True,
+        )
+
+
 def test_restart_archives_an_incomplete_checkpoint(tmp_path: Path) -> None:
     path = tmp_path / "state.json"
     config = BackfillConfig()
@@ -236,7 +263,9 @@ def test_version_one_checkpoint_migrates_its_batch_reference(tmp_path: Path) -> 
     state = _read_state(path)
 
     assert state is not None
-    assert state.version == 3
+    assert state.version == 4
+    assert state.mode == "missing"
+    assert state.include_disabled is False
     assert state.next_batch_available_at == reference
 
 
@@ -275,7 +304,7 @@ def test_version_two_checkpoint_moves_after_its_last_individual_job(
     state = _read_state(path)
 
     assert state is not None
-    assert state.version == 3
+    assert state.version == 4
     assert (
         state.next_batch_available_at == (reference + timedelta(minutes=30)).isoformat()
     )
@@ -320,7 +349,7 @@ def test_scheduler_persists_batches_with_random_available_at_gaps(
         return EnqueueBatchResult(1, 0, 0)
 
     monkeypatch.setattr(backfill_module, "async_session_factory", session_factory)
-    monkeypatch.setattr(backfill_module, "find_missing_cards", find_cards)
+    monkeypatch.setattr(backfill_module, "find_cards", find_cards)
     monkeypatch.setattr(backfill_module, "enqueue_card_batch", enqueue)
 
     result = asyncio.run(
@@ -364,7 +393,7 @@ def test_fatal_scheduler_error_is_saved_for_resume(tmp_path: Path, monkeypatch) 
     monkeypatch.setattr(
         backfill_module, "async_session_factory", lambda: SessionContext()
     )
-    monkeypatch.setattr(backfill_module, "find_missing_cards", fail)
+    monkeypatch.setattr(backfill_module, "find_cards", fail)
 
     with pytest.raises(RuntimeError, match="database unavailable"):
         asyncio.run(
@@ -380,3 +409,121 @@ def test_fatal_scheduler_error_is_saved_for_resume(tmp_path: Path, monkeypatch) 
     assert checkpoint.status == "failed"
     assert checkpoint.last_card_id == 0
     assert checkpoint.error == "RuntimeError: database unavailable"
+
+
+def test_refresh_all_query_ignores_listings_and_refresh_date() -> None:
+    statement = build_cards_statement(
+        mode=ScheduleMode.ALL,
+        after_card_id=100,
+        limit=50,
+        now=datetime(2026, 9, 11, tzinfo=UTC),
+        include_disabled=False,
+    )
+    sql = str(
+        statement.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+
+    assert "cards.id > 100" in sql
+    assert "scrape_targets.is_enabled IS true" in sql
+    assert "NOT (EXISTS (SELECT scrape_jobs.id" in sql
+    assert "card_listings" not in sql
+    assert "next_refresh_at" not in sql
+
+
+def test_refresh_all_can_include_disabled_targets() -> None:
+    statement = build_cards_statement(
+        mode=ScheduleMode.ALL,
+        after_card_id=0,
+        limit=50,
+        now=datetime(2026, 9, 11, tzinfo=UTC),
+        include_disabled=True,
+    )
+    sql = str(
+        statement.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+
+    assert "scrape_targets.is_enabled IS true" not in sql
+    assert "NOT (EXISTS (SELECT scrape_jobs.id" in sql
+
+
+def test_enqueue_with_disabled_targets_clears_disabled_state() -> None:
+    db = FakeDB([7, uuid4()])
+    card = SimpleNamespace(id=1, ygo_id=11, name="One")
+    now = datetime(2026, 9, 11, tzinfo=UTC)
+
+    result = asyncio.run(
+        enqueue_card_batch(
+            db,
+            [card],
+            priority=-10,
+            available_at=now,
+            requested_at=now,
+            include_disabled=True,
+        )
+    )
+    target_statement = db.statements[0]
+    sql = str(target_statement.compile(dialect=postgresql.dialect()))
+    parameters = target_statement.compile(dialect=postgresql.dialect()).params
+
+    assert result.jobs_created == 1
+    assert "WHERE scrape_targets.is_enabled IS true" not in sql
+    assert "is_enabled =" in sql
+    assert "disabled_reason =" in sql
+    assert "disabled_at =" in sql
+    assert "next_refresh_at =" in sql
+    assert True in parameters.values()
+    assert list(parameters.values()).count(None) >= 3
+
+
+def test_refresh_all_uses_its_mode_and_checkpoint_options(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "catalog-refresh.json"
+    now = datetime(2026, 9, 11, tzinfo=UTC)
+    observed: list[tuple[ScheduleMode, bool]] = []
+
+    class SessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+    async def no_cards(
+        _db: object,
+        *,
+        mode: ScheduleMode,
+        include_disabled: bool,
+        **__: object,
+    ) -> list[SimpleNamespace]:
+        observed.append((mode, include_disabled))
+
+        return []
+
+    monkeypatch.setattr(
+        backfill_module, "async_session_factory", lambda: SessionContext()
+    )
+    monkeypatch.setattr(backfill_module, "find_cards", no_cards)
+
+    result = asyncio.run(
+        run_full_catalog_refresh(
+            state_path=path,
+            config=BackfillConfig(),
+            include_disabled=True,
+            now_factory=lambda: now,
+        )
+    )
+    checkpoint = _read_state(path)
+
+    assert result.status == "completed"
+    assert observed == [(ScheduleMode.ALL, True)]
+    assert checkpoint is not None
+    assert checkpoint.mode == "all"
+    assert checkpoint.include_disabled is True

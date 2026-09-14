@@ -6,6 +6,7 @@ import os
 import random
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -22,11 +23,16 @@ from src.core.utils.utils import datetime_now
 from src.settings.scraper_settings import ScraperSettings, scraper_settings
 
 logger = logging.getLogger("free_win.scraper_backfill")
-STATE_VERSION = 3
+STATE_VERSION = 4
 
 
 class BackfillStateError(RuntimeError):
     pass
+
+
+class ScheduleMode(StrEnum):
+    MISSING = "missing"
+    ALL = "all"
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +66,8 @@ class BackfillState:
     last_card_id: int
     next_batch_available_at: str
     config: dict[str, int]
+    mode: str
+    include_disabled: bool
     batches_committed: int = 0
     jobs_created: int = 0
     jobs_reused: int = 0
@@ -67,7 +75,14 @@ class BackfillState:
     error: str | None = None
 
     @classmethod
-    def new(cls, config: BackfillConfig, now: datetime) -> BackfillState:
+    def new(
+        cls,
+        config: BackfillConfig,
+        now: datetime,
+        *,
+        mode: ScheduleMode = ScheduleMode.MISSING,
+        include_disabled: bool = False,
+    ) -> BackfillState:
         timestamp = now.isoformat()
 
         return cls(
@@ -80,6 +95,8 @@ class BackfillState:
             last_card_id=0,
             next_batch_available_at=timestamp,
             config=asdict(config),
+            mode=mode.value,
+            include_disabled=include_disabled,
         )
 
     @classmethod
@@ -87,6 +104,8 @@ class BackfillState:
         value = dict(value)
 
         if value.get("version") == 1:
+            value.setdefault("mode", ScheduleMode.MISSING.value)
+            value.setdefault("include_disabled", False)
             value["version"] = STATE_VERSION
 
         if value.get("version") == 2:
@@ -103,6 +122,13 @@ class BackfillState:
                     + timedelta(minutes=max_interval)
                 ).isoformat()
 
+            value.setdefault("mode", ScheduleMode.MISSING.value)
+            value.setdefault("include_disabled", False)
+            value["version"] = STATE_VERSION
+
+        if value.get("version") == 3:
+            value.setdefault("mode", ScheduleMode.MISSING.value)
+            value.setdefault("include_disabled", False)
             value["version"] = STATE_VERSION
 
         try:
@@ -112,6 +138,18 @@ class BackfillState:
 
         if state.version != STATE_VERSION:
             raise BackfillStateError(f"Unsupported checkpoint version: {state.version}")
+
+        try:
+            ScheduleMode(state.mode)
+        except ValueError as exc:
+            raise BackfillStateError(
+                f"Unsupported checkpoint mode: {state.mode}"
+            ) from exc
+
+        if not isinstance(state.include_disabled, bool):
+            raise BackfillStateError(
+                "Checkpoint include_disabled must be a boolean"
+            )
 
         return state
 
@@ -180,6 +218,23 @@ def build_missing_cards_statement(
     limit: int,
     now: datetime,
 ) -> Select[tuple[Card]]:
+    return build_cards_statement(
+        mode=ScheduleMode.MISSING,
+        after_card_id=after_card_id,
+        limit=limit,
+        now=now,
+        include_disabled=False,
+    )
+
+
+def build_cards_statement(
+    *,
+    mode: ScheduleMode,
+    after_card_id: int,
+    limit: int,
+    now: datetime,
+    include_disabled: bool,
+) -> Select[tuple[Card]]:
     has_listing = exists(select(CardListing.id).where(CardListing.card_id == Card.id))
     has_active_job = exists(
         select(ScrapeJob.id)
@@ -189,26 +244,36 @@ def build_missing_cards_statement(
             ScrapeJob.status.in_(ACTIVE_JOB_STATUSES),
         )
     )
-    eligible_target = or_(
+    enabled_target = or_(
         ScrapeTarget.id.is_(None),
-        and_(
-            ScrapeTarget.is_enabled.is_(True),
-            or_(
-                ScrapeTarget.next_refresh_at.is_(None),
-                ScrapeTarget.next_refresh_at <= now,
-            ),
-        ),
+        ScrapeTarget.is_enabled.is_(True),
     )
+    conditions = [Card.id > after_card_id, ~has_active_job]
+
+    if not include_disabled:
+        conditions.append(enabled_target)
+
+    if mode is ScheduleMode.MISSING:
+        conditions.extend(
+            (
+                ~has_listing,
+                or_(
+                    ScrapeTarget.id.is_(None),
+                    and_(
+                        ScrapeTarget.is_enabled.is_(True),
+                        or_(
+                            ScrapeTarget.next_refresh_at.is_(None),
+                            ScrapeTarget.next_refresh_at <= now,
+                        ),
+                    ),
+                ),
+            )
+        )
 
     return (
         select(Card)
         .outerjoin(ScrapeTarget, ScrapeTarget.card_id == Card.id)
-        .where(
-            Card.id > after_card_id,
-            ~has_listing,
-            ~has_active_job,
-            eligible_target,
-        )
+        .where(*conditions)
         .order_by(Card.id.asc())
         .limit(limit)
     )
@@ -230,6 +295,26 @@ async def find_missing_cards(
     return list((await db.execute(statement)).unique().scalars().all())
 
 
+async def find_cards(
+    db: AsyncSession,
+    *,
+    mode: ScheduleMode,
+    after_card_id: int,
+    limit: int,
+    now: datetime,
+    include_disabled: bool,
+) -> list[Card]:
+    statement = build_cards_statement(
+        mode=mode,
+        after_card_id=after_card_id,
+        limit=limit,
+        now=now,
+        include_disabled=include_disabled,
+    )
+
+    return list((await db.execute(statement)).unique().scalars().all())
+
+
 async def count_missing_cards(db: AsyncSession, *, now: datetime) -> int:
     statement = build_missing_cards_statement(
         after_card_id=0,
@@ -242,6 +327,25 @@ async def count_missing_cards(db: AsyncSession, *, now: datetime) -> int:
     return int(result.scalar_one())
 
 
+async def count_cards(
+    db: AsyncSession,
+    *,
+    mode: ScheduleMode,
+    now: datetime,
+    include_disabled: bool,
+) -> int:
+    statement = build_cards_statement(
+        mode=mode,
+        after_card_id=0,
+        limit=2_147_483_647,
+        now=now,
+        include_disabled=include_disabled,
+    )
+    result = await db.execute(select(func.count()).select_from(statement.subquery()))
+
+    return int(result.scalar_one())
+
+
 async def enqueue_card_batch(
     db: AsyncSession,
     cards: list[Card],
@@ -249,31 +353,45 @@ async def enqueue_card_batch(
     priority: int,
     available_at: datetime,
     requested_at: datetime,
+    include_disabled: bool = False,
 ) -> EnqueueBatchResult:
     created = 0
     reused = 0
     skipped = 0
 
     for card in cards:
-        target_statement = (
-            insert(ScrapeTarget)
-            .values(
+        target_updates: dict[str, object] = {
+            "canonical_name": card.name,
+            "ygo_id": card.ygo_id,
+            "last_requested_at": requested_at,
+        }
+
+        if include_disabled:
+            target_updates.update(
+                is_enabled=True,
+                disabled_reason=None,
+                disabled_at=None,
+                next_refresh_at=None,
+            )
+
+        target_insert = insert(ScrapeTarget).values(
                 card_id=card.id,
                 ygo_id=card.ygo_id,
                 canonical_name=card.name,
                 last_requested_at=requested_at,
             )
-            .on_conflict_do_update(
+
+        if include_disabled:
+            target_statement = target_insert.on_conflict_do_update(
                 index_elements=[ScrapeTarget.card_id],
-                set_={
-                    "canonical_name": card.name,
-                    "ygo_id": card.ygo_id,
-                    "last_requested_at": requested_at,
-                },
+                set_=target_updates,
+            ).returning(ScrapeTarget.id)
+        else:
+            target_statement = target_insert.on_conflict_do_update(
+                index_elements=[ScrapeTarget.card_id],
+                set_=target_updates,
                 where=ScrapeTarget.is_enabled.is_(True),
-            )
-            .returning(ScrapeTarget.id)
-        )
+            ).returning(ScrapeTarget.id)
         target_id = (await db.execute(target_statement)).scalar_one_or_none()
 
         if target_id is None:
@@ -307,6 +425,8 @@ def _load_or_create_state(
     now: datetime,
     *,
     restart: bool,
+    mode: ScheduleMode = ScheduleMode.MISSING,
+    include_disabled: bool = False,
 ) -> BackfillState:
     state = _read_state(path)
 
@@ -315,14 +435,23 @@ def _load_or_create_state(
         state = None
 
     if state is None or state.status == "completed":
-        state = BackfillState.new(config, now)
+        state = BackfillState.new(
+            config,
+            now,
+            mode=mode,
+            include_disabled=include_disabled,
+        )
         _write_state(path, state)
 
         return state
 
-    if state.config != asdict(config):
+    if (
+        state.config != asdict(config)
+        or state.mode != mode.value
+        or state.include_disabled != include_disabled
+    ):
         raise BackfillStateError(
-            "Checkpoint configuration differs from this invocation; use --restart"
+            "Checkpoint options differ from this invocation; use --restart"
         )
 
     state.status = "running"
@@ -342,12 +471,61 @@ async def run_missing_listings_backfill(
     now_factory=datetime_now,
     rng: random.Random | None = None,
 ) -> BackfillResult:
+    return await run_scrape_schedule(
+        state_path=state_path,
+        config=config,
+        mode=ScheduleMode.MISSING,
+        restart=restart,
+        dry_run=dry_run,
+        now_factory=now_factory,
+        rng=rng,
+    )
+
+
+async def run_full_catalog_refresh(
+    *,
+    state_path: Path,
+    config: BackfillConfig,
+    include_disabled: bool = False,
+    restart: bool = False,
+    dry_run: bool = False,
+    now_factory=datetime_now,
+    rng: random.Random | None = None,
+) -> BackfillResult:
+    return await run_scrape_schedule(
+        state_path=state_path,
+        config=config,
+        mode=ScheduleMode.ALL,
+        include_disabled=include_disabled,
+        restart=restart,
+        dry_run=dry_run,
+        now_factory=now_factory,
+        rng=rng,
+    )
+
+
+async def run_scrape_schedule(
+    *,
+    state_path: Path,
+    config: BackfillConfig,
+    mode: ScheduleMode,
+    include_disabled: bool = False,
+    restart: bool = False,
+    dry_run: bool = False,
+    now_factory=datetime_now,
+    rng: random.Random | None = None,
+) -> BackfillResult:
     randomizer = rng or random.Random()
     now = now_factory()
 
     if dry_run:
         async with async_session_factory() as db:
-            count = await count_missing_cards(db, now=now)
+            count = await count_cards(
+                db,
+                mode=mode,
+                now=now,
+                include_disabled=include_disabled,
+            )
 
         return BackfillResult("dry-run", "dry_run", 0, 0, 0, 0, count)
 
@@ -362,18 +540,27 @@ async def run_missing_listings_backfill(
         ) from exc
 
     try:
-        state = _load_or_create_state(state_path, config, now, restart=restart)
+        state = _load_or_create_state(
+            state_path,
+            config,
+            now,
+            restart=restart,
+            mode=mode,
+            include_disabled=include_disabled,
+        )
 
         try:
             while True:
                 now = now_factory()
 
                 async with async_session_factory() as db:
-                    cards = await find_missing_cards(
+                    cards = await find_cards(
                         db,
+                        mode=mode,
                         after_card_id=state.last_card_id,
                         limit=config.batch_size,
                         now=now,
+                        include_disabled=include_disabled,
                     )
 
                 if not cards:
@@ -395,6 +582,7 @@ async def run_missing_listings_backfill(
                         priority=config.priority,
                         available_at=scheduled_at,
                         requested_at=now,
+                        include_disabled=include_disabled,
                     )
 
                 state.last_card_id = cards[-1].id
@@ -413,7 +601,8 @@ async def run_missing_listings_backfill(
                 logger.info(
                     json.dumps(
                         {
-                            "event": "backfill_batch_committed",
+                            "event": "scrape_schedule_batch_committed",
+                            "mode": mode.value,
                             "run_id": state.run_id,
                             "batch": state.batches_committed,
                             "last_card_id": state.last_card_id,
