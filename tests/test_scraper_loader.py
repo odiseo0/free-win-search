@@ -1,7 +1,13 @@
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from src.core.services.scraper.loader import build_card_listing_rows
+from sqlalchemy.dialects import postgresql
+
+from src.core.services.scraper.loader import (
+    build_card_listing_rows,
+    load_scraped_data_to_database,
+)
 from src.core.services.scraper.transformers import CardListing
 
 
@@ -74,3 +80,89 @@ def test_loader_keeps_variants_with_the_same_code_and_condition() -> None:
     )
 
     assert len(rows) == 2
+
+
+class _RowCountResult:
+    rowcount = 1
+
+
+class _RecordingDB:
+    def __init__(self) -> None:
+        self.statements: list[object] = []
+
+    async def execute(self, statement: object) -> _RowCountResult:
+        self.statements.append(statement)
+
+        return _RowCountResult()
+
+
+def test_loader_zeroes_only_existing_listings_with_observed_codes() -> None:
+    db = _RecordingDB()
+    observed_at = datetime(2026, 9, 21, tzinfo=UTC)
+
+    result = asyncio.run(
+        load_scraped_data_to_database(
+            db,  # type: ignore[arg-type]
+            card_id=10,
+            ygo_id=29436665,
+            out_of_stock_codes=("wcpp-en014",),
+            observed_at=observed_at,
+        )
+    )
+
+    assert result.card_listings_zeroed == 1
+    assert len(db.statements) == 1
+    compiled = db.statements[0].compile(dialect=postgresql.dialect())  # type: ignore[union-attr]
+    sql = str(compiled)
+
+    assert "UPDATE card_listings" in sql
+    assert "card_listings.card_id" in sql
+    assert "card_listings.code IN" in sql
+    assert ["WCPP-EN014"] in compiled.params.values()
+    assert ["SD6-EN001"] not in compiled.params.values()
+
+
+def test_loader_does_not_zero_a_code_seen_in_stock() -> None:
+    db = _RecordingDB()
+    observed_at = datetime(2026, 9, 21, tzinfo=UTC)
+    listing = CardListing(
+        name="Dark Eradicator Warlock",
+        set="Promo",
+        code="WCPP-EN014",
+        price=Decimal("25.99"),
+        rarity="Rare",
+        condition="Near Mint",
+        stock=1,
+        source_product_key="dark eradicator warlock",
+    )
+
+    result = asyncio.run(
+        load_scraped_data_to_database(
+            db,  # type: ignore[arg-type]
+            card_id=10,
+            ygo_id=29436665,
+            card_listings=(listing,),
+            out_of_stock_codes=("WCPP-EN014",),
+            observed_at=observed_at,
+        )
+    )
+
+    assert result.card_listings_loaded == 1
+    assert result.card_listings_zeroed == 0
+    assert len(db.statements) == 1
+
+
+def test_loader_ignores_unidentifiable_out_of_stock_product() -> None:
+    db = _RecordingDB()
+
+    result = asyncio.run(
+        load_scraped_data_to_database(
+            db,  # type: ignore[arg-type]
+            card_id=10,
+            ygo_id=29436665,
+            out_of_stock_codes=(),
+        )
+    )
+
+    assert result.card_listings_zeroed == 0
+    assert db.statements == []

@@ -54,6 +54,42 @@ def test_search_parser_keeps_yugioh_variants_and_rejects_other_results() -> None
     ]
 
 
+def test_search_parser_keeps_same_title_variants_by_url() -> None:
+    html = _page(
+        _row("Dark Eradicator Warlock", "/p/YuGiOh/DarkEradicatorPromo"),
+        _row("Dark Eradicator Warlock", "/p/YuGiOh/DarkEradicatorOTS"),
+        """
+        <div class="product-search-row main-container">
+          <a class="productLink" href="/p/YuGiOh/DarkEradicatorSD">
+            <span itemprop="name">Dark Eradicator Warlock</span>
+          </a>
+          <div class="breadcrumb-trail">YuGiOh » Structure Deck</div>
+          <span>Out of Stock</span>
+          <span>Notes: WCPP-EN014</span>
+        </div>
+        """,
+    )
+
+    page = parse_search_page(
+        html,
+        canonical_name="Dark Eradicator Warlock",
+        current_url="https://www.coolstuffinc.com/main_search.php",
+        current_page=1,
+    )
+
+    assert len(page.products) == 3
+    assert {product.url for product in page.products} == {
+        "https://www.coolstuffinc.com/p/YuGiOh/DarkEradicatorPromo",
+        "https://www.coolstuffinc.com/p/YuGiOh/DarkEradicatorOTS",
+        "https://www.coolstuffinc.com/p/YuGiOh/DarkEradicatorSD",
+    }
+    assert {product.source_product_key for product in page.products} == {
+        "dark eradicator warlock"
+    }
+    assert page.products[-1].out_of_stock is True
+    assert page.products[-1].observed_code == "WCPP-EN014"
+
+
 def test_search_parser_accepts_duplicate_identical_next_links() -> None:
     next_url = (
         "/main_search.php?pa=searchOnName&page=2&resultsPerPage=25"
