@@ -51,15 +51,15 @@ from .transformers import (
 logger = logging.getLogger("free_win.scraper_worker")
 
 
+def _log(event: str, **context: object) -> None:
+    logger.info(json.dumps({"event": event, **context}, default=str))
+
+
 class ScrapeFlowError(RuntimeError):
     def __init__(self, code: str, retry_after_seconds: int | None = None) -> None:
         super().__init__(code)
         self.code = code
         self.retry_after_seconds = retry_after_seconds
-
-
-def _log(event: str, **context: object) -> None:
-    logger.info(json.dumps({"event": event, **context}, default=str))
 
 
 class ScraperWorker:
@@ -133,6 +133,7 @@ class ScraperWorker:
                     card_id=job.target.card_id,
                     ygo_id=job.target.ygo_id,
                     card_listings=transformed.listings,
+                    out_of_stock_codes=transformed.out_of_stock_codes,
                     confirmed_empty=transformed.report.confirmed_empty,
                     observed_at=now,
                 )
@@ -171,8 +172,16 @@ class ScraperWorker:
             error_code = "search_pagination"
         except SearchStructureError:
             error_code = "search_structure"
-        except ParserStructureError:
-            error_code = "parser_structure"
+        except ParserStructureError as exc:
+            error_code = exc.code
+            _log(
+                "parser_rejected",
+                job_id=job.id,
+                ygo_id=job.target.ygo_id,
+                error_code=exc.code,
+                message=str(exc),
+                **exc.context,
+            )
         except ScrapeFlowError as exc:
             error_code = exc.code
             retry_override = exc.retry_after_seconds
@@ -250,7 +259,7 @@ class ScraperWorker:
             confirmed_empty = confirmed_empty or page.confirmed_empty
 
             for product in page.products:
-                products[product.source_product_key] = product
+                products[product.url] = product
 
             if page.next_url is None:
                 break
@@ -290,13 +299,61 @@ class ScraperWorker:
             ) not in normalize_search_text(page_title):
                 raise ScrapeFlowError("product_redirect")
 
-            transformed_pages.append(
-                await self._transform_product(
+            try:
+                transformed = await self._transform_product(
                     result.html or "",
                     product.title,
                     product.source_product_key,
                 )
-            )
+            except ParserStructureError as exc:
+                exc.context = {**exc.context, "product_url": product.url}
+
+                if not (product.out_of_stock and exc.code.startswith("listing_rows_")):
+                    raise
+
+                observed_codes = (
+                    (product.observed_code,) if product.observed_code else ()
+                )
+                _log(
+                    "out_of_stock_product_incomplete",
+                    product_url=product.url,
+                    product_title=product.title,
+                    observed_code=product.observed_code,
+                    parser_error_code=exc.code,
+                )
+                transformed = TransformResult(
+                    [],
+                    TransformReport(
+                        rows_seen=int(exc.context.get("rows_seen", 0)),
+                        rows_valid=0,
+                        rows_rejected=int(exc.context.get("rows_seen", 0)),
+                    ),
+                    out_of_stock_codes=observed_codes,
+                )
+
+            if product.out_of_stock and product.observed_code:
+                transformed = TransformResult(
+                    transformed.listings,
+                    transformed.report,
+                    out_of_stock_codes=tuple(
+                        dict.fromkeys(
+                            (*transformed.out_of_stock_codes, product.observed_code)
+                        )
+                    ),
+                )
+
+            if (
+                product.out_of_stock
+                and product.observed_code is None
+                and not transformed.out_of_stock_codes
+            ):
+                _log(
+                    "out_of_stock_product_unidentifiable",
+                    product_url=product.url,
+                    product_title=product.title,
+                )
+
+            transformed_pages.append(transformed)
 
         listings = [
             listing
@@ -304,6 +361,13 @@ class ScraperWorker:
             for listing in transformed.listings
         ]
         rows_seen = sum(item.report.rows_seen for item in transformed_pages)
+        out_of_stock_codes = tuple(
+            dict.fromkeys(
+                code
+                for transformed in transformed_pages
+                for code in transformed.out_of_stock_codes
+            )
+        )
 
         return TransformResult(
             listings=listings,
@@ -314,6 +378,7 @@ class ScraperWorker:
                     item.report.rows_rejected for item in transformed_pages
                 ),
             ),
+            out_of_stock_codes=out_of_stock_codes,
         )
 
     async def _transform_product(

@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
-from urllib.parse import parse_qs, urljoin, urlsplit
+from urllib.parse import parse_qs, urljoin, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
 
@@ -23,6 +23,8 @@ class SearchProduct:
     title: str
     url: str
     source_product_key: str
+    observed_code: str | None = None
+    out_of_stock: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +43,12 @@ def source_product_key(title: str) -> str:
     return normalize_search_text(title)
 
 
+_SEARCH_CARD_CODE_PATTERN = re.compile(
+    r"(?:Notes|Card\s*#):\s*([A-Z]{2,4}\d*-(?:[A-Z]{2,3})?\d+)",
+    re.IGNORECASE,
+)
+
+
 def _valid_product_url(url: str) -> bool:
     parsed = urlsplit(url)
     return (
@@ -49,6 +57,19 @@ def _valid_product_url(url: str) -> bool:
         and parsed.path.startswith("/p/YuGiOh/")
         and not parsed.query
         and not parsed.fragment
+    )
+
+
+def _normalize_product_url(url: str) -> str:
+    parsed = urlsplit(url)
+    return urlunsplit(
+        (
+            parsed.scheme.casefold(),
+            parsed.netloc.casefold(),
+            parsed.path,
+            "",
+            "",
+        )
     )
 
 
@@ -101,6 +122,7 @@ def parse_search_page(
 
         title = title_node.get_text(" ", strip=True)
         category = breadcrumb.get_text(" ", strip=True)
+        row_text = row.get_text(" ", strip=True)
         url = urljoin(BASE_URL, str(link.get("href", "")))
 
         if normalized_name not in normalize_search_text(title):
@@ -112,8 +134,15 @@ def parse_search_page(
         if not _valid_product_url(url):
             continue
 
-        key = source_product_key(title)
-        products[key] = SearchProduct(title=title, url=url, source_product_key=key)
+        url = _normalize_product_url(url)
+        code_match = _SEARCH_CARD_CODE_PATTERN.search(row_text)
+        products[url] = SearchProduct(
+            title=title,
+            url=url,
+            source_product_key=source_product_key(title),
+            observed_code=(code_match.group(1).upper() if code_match else None),
+            out_of_stock="out of stock" in normalize_search_text(row_text),
+        )
 
     empty_text = "no results for items like" in normalize_search_text(
         soup.get_text(" ", strip=True)

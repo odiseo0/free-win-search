@@ -14,10 +14,13 @@ from src.core.utils import deduplicate_listings
 _PARSE_EXECUTOR: ProcessPoolExecutor | None = None
 PARSE_MAX_WORKERS = max(1, os.process_cpu_count() or 1)
 _CARD_CODE_PATTERN = re.compile(r"[A-Z]{2,4}\d*-(?:[A-Z]{2,3})?\d+")
-_TEXT_CARD_CODE_PATTERN = re.compile(rf"Card #:\s*({_CARD_CODE_PATTERN.pattern})")
+_TEXT_CARD_CODE_PATTERN = re.compile(
+    rf"(?:Card #|Notes):\s*({_CARD_CODE_PATTERN.pattern})",
+    re.IGNORECASE,
+)
 _RARITY_PATTERN = re.compile(
     r"Rarity:\s*([A-Za-z][A-Za-z\s]*?)"
-    r"(?=\s*(?:Card\s*#|\(|Only\b|In Stock\b|Out\b|\$|$))"
+    r"(?=\s*(?:Card\s*#|Notes:|\(|Only\b|In Stock\b|Out\b|\$|$))"
 )
 _PRICE_PATTERN = re.compile(r"\$\s*(\d+\.?\d*)")
 _STOCK_PATTERN = re.compile(r"(?:Only\s+)?(\d+)\s+In Stock")
@@ -220,7 +223,19 @@ def parse_card_listings(
 
 
 class ParserStructureError(ValueError):
-    pass
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        context: dict[str, object] | None = None,
+    ) -> None:
+        super().__init__(code, message, context or {})
+        self.code = code
+        self.message = message
+        self.context = context or {}
+
+    def __str__(self) -> str:
+        return self.message
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,6 +250,32 @@ class TransformReport:
 class TransformResult:
     listings: list[CardListing]
     report: TransformReport
+    out_of_stock_codes: tuple[str, ...] = ()
+
+
+def _row_rejection_reasons(row_text: str) -> tuple[str, ...]:
+    reasons: list[str] = []
+
+    if _CARD_CODE_PATTERN.search(row_text) is None:
+        reasons.append("missing_code")
+
+    if _PRICE_PATTERN.search(row_text) is None:
+        reasons.append("missing_price")
+
+    if not any(condition in row_text[:100] for condition in _CONDITIONS):
+        reasons.append("missing_condition")
+
+    return tuple(reasons) or ("invalid",)
+
+
+def _parser_error_code(reasons: set[str]) -> str:
+    if len(reasons) == 1:
+        reason = next(iter(reasons))
+
+        if reason in {"missing_code", "missing_price", "missing_condition"}:
+            return f"listing_rows_{reason}"
+
+    return "listing_rows_invalid"
 
 
 def transform_card_page(
@@ -242,6 +283,7 @@ def transform_card_page(
 ) -> TransformResult:
     soup = BeautifulSoup(html, "html.parser")
     rows = soup.select("div.products-container div.row, div.row.product-row")
+    row_texts = [row.get_text(" ", strip=True) for row in rows]
     confirmed_empty = bool(
         soup.select_one("div.products-container")
         and not rows
@@ -250,12 +292,42 @@ def transform_card_page(
         )
     )
     listings = parse_card_listings(html, card_name, source_product_key)
+    out_of_stock_rows = [
+        text for text in row_texts if "out of stock" in text.casefold()
+    ]
+    out_of_stock_codes = tuple(
+        dict.fromkeys(
+            match.group(0).upper()
+            for text in out_of_stock_rows
+            if (match := _CARD_CODE_PATTERN.search(text)) is not None
+        )
+    )
 
-    if rows and not listings:
-        raise ParserStructureError("Listing rows were found but none passed validation")
+    if (rows and not listings) and (len(out_of_stock_rows) != len(rows)):
+        rejection_reasons = {
+            reason for text in row_texts for reason in _row_rejection_reasons(text)
+        }
+        raise ParserStructureError(
+            _parser_error_code(rejection_reasons),
+            "Listing rows were found but none passed validation",
+            {
+                "card_name": card_name,
+                "source_product_key": source_product_key,
+                "rows_seen": len(rows),
+                "rejection_reasons": sorted(rejection_reasons),
+            },
+        )
 
     if not rows and not confirmed_empty and not listings:
-        raise ParserStructureError("Unrecognized listing page structure")
+        raise ParserStructureError(
+            "listing_page_unrecognized",
+            "Unrecognized listing page structure",
+            {
+                "card_name": card_name,
+                "source_product_key": source_product_key,
+                "rows_seen": 0,
+            },
+        )
 
     return TransformResult(
         listings=listings,
@@ -265,6 +337,7 @@ def transform_card_page(
             rows_rejected=max(0, len(rows) - len(listings)),
             confirmed_empty=confirmed_empty,
         ),
+        out_of_stock_codes=out_of_stock_codes,
     )
 
 

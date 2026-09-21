@@ -16,6 +16,7 @@ from src.api.cards.repository.model import CardListing
 @dataclass(frozen=True, slots=True)
 class ScraperLoadResult:
     card_listings_loaded: int = 0
+    card_listings_zeroed: int = 0
     card_listings_deactivated: int = 0
 
 
@@ -104,6 +105,7 @@ async def load_scraped_data_to_database(
     card_id: int,
     ygo_id: int,
     card_listings: Sequence[CardListingData] = (),
+    out_of_stock_codes: Sequence[str] = (),
     source: str = "coolstuffinc",
     confirmed_empty: bool = False,
     observed_at: datetime | None = None,
@@ -137,6 +139,35 @@ async def load_scraped_data_to_database(
         )
         await db.execute(stmt)
 
+    in_stock_codes = {
+        listing.code.strip().upper()
+        for listing in card_listings
+        if listing.stock > 0 and listing.code.strip()
+    }
+    codes_to_zero = tuple(
+        sorted(
+            {
+                code.strip().upper()
+                for code in out_of_stock_codes
+                if code.strip() and code.strip().upper() not in in_stock_codes
+            }
+        )
+    )
+    zeroed = 0
+
+    if codes_to_zero:
+        result = await db.execute(
+            update(CardListing)
+            .where(
+                CardListing.card_id == card_id,
+                CardListing.source == source.strip().casefold(),
+                CardListing.code.in_(codes_to_zero),
+                CardListing.is_active.is_(True),
+            )
+            .values(stock=0, last_seen_at=seen_at, date_updated=seen_at)
+        )
+        zeroed = result.rowcount  # type: ignore[attr-defined]
+
     deactivated = 0
 
     if confirmed_empty:
@@ -151,4 +182,8 @@ async def load_scraped_data_to_database(
         )
         deactivated = result.rowcount  # type: ignore[attr-defined]
 
-    return ScraperLoadResult(len(rows), deactivated)
+    return ScraperLoadResult(
+        card_listings_loaded=len(rows),
+        card_listings_zeroed=zeroed,
+        card_listings_deactivated=deactivated,
+    )
