@@ -347,6 +347,7 @@ class MeilisearchClient:
                 raise MeilisearchSerializationError(
                     "Meilisearch request body is not JSON serializable"
                 ) from error
+
             headers["Content-Type"] = "application/json"
 
         attempts = self.config.max_retries + 1 if retry_safe else 1
